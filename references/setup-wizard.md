@@ -2,6 +2,16 @@
 
 When the user wants to set up the webhook relay for the first time, walk them through this interactive questionnaire. Use AskUserQuestion for each phase. Collect answers before generating config files.
 
+## Security-First URL Model (Default)
+
+Default to minimum exposure:
+- Expose exactly one ingress service: `adnanh/webhook`
+- Keep OpenClaw private (`localhost` or tailnet-only), never public internet
+- Reuse one public base URL with path-based routes:
+  - `https://<relay-host>/hooks/github-pr`
+  - `https://<relay-host>/hooks/linear`
+  - Optional OAuth callback only if needed: `https://<relay-host>/auth/github/callback`
+
 ## Phase 1: Scope
 
 Ask:
@@ -14,18 +24,33 @@ Ask:
 Ask:
 - **Where will the webhook server run?** Local machine, VPS, Docker, or existing server?
 - **Is OpenClaw colocated?** Same machine as webhook server (localhost) or separate host?
+- **Security profile?** Minimum exposure (recommended) or custom network exposure?
 - **Tailscale?** Already using Tailscale, want to set it up, or prefer a different public ingress (e.g. ngrok, Cloudflare Tunnel)?
+- **Public relay base URL?** e.g. `https://your-machine.tail-net.ts.net` (single host for all webhook routes)
+- **Single-port ingress confirmed?** Route only to webhook server; keep OpenClaw bound to private interface only
 - **Deployment target directory?** Where to write config files (default: `./hooks/`)
 
 ## Phase 3: GitHub Setup (if selected)
 
 Ask:
+- **Create mode?** Create/update via `gh` manifest flow (recommended) or manual UI?
+- **GitHub App owner?** Personal account or organization (where the app will live)
 - **GitHub App name?** e.g. `openclaw-coder` (will become `name[bot]` identity)
+- **Homepage URL?** e.g. docs/project URL
+- **Webhook URL?** Default: `{public-relay-base-url}/hooks/github-pr`
+- **Manifest redirect URL?** (CLI flow only) Default: `{public-relay-base-url}/auth/github/manifest`
 - **GitHub App permissions** — confirm defaults or customize:
   - Pull requests: Read & write
   - Contents: Read-only
   - Metadata: Read-only
-- **Do you already have the App created?** If yes, collect App ID, Installation ID, and private key path. If no, guide them through creation.
+- **GitHub events** — confirm defaults or customize:
+  - `pull_request`
+  - `pull_request_review`
+  - `pull_request_review_comment`
+  - `issue_comment`
+- **OAuth callback required?** If no, omit callback URLs for smaller attack surface. If yes, collect callback URL(s), default: `{public-relay-base-url}/auth/github/callback`
+- **Repository installation scope?** All repositories or selected repositories
+- **Do you already have the App created?** If yes, collect App ID, Installation ID, and private key path. If no, guide them through creation using [github-hooks.md](github-hooks.md) (CLI manifest flow or manual).
 
 ## Phase 4: Linear Setup (if selected)
 
@@ -59,6 +84,8 @@ Collect:
 - `GITHUB_APP_ID` (from GitHub App settings)
 - `GITHUB_APP_PRIVATE_KEY` path (from GitHub App)
 - `GITHUB_INSTALLATION_ID` (from GitHub App installation)
+- `GITHUB_APP_CLIENT_ID` (only if OAuth callback/auth flow is enabled)
+- `GITHUB_APP_CLIENT_SECRET` (only if OAuth callback/auth flow is enabled)
 - `LINEAR_AGENT_API_KEY` (from Linear agent user)
 - `LINEAR_AGENT_USER_ID` (from Linear agent user)
 
@@ -84,18 +111,21 @@ Print a checklist of remaining manual steps:
 ```
 Setup checklist:
 [ ] Install webhook: brew install webhook
-[ ] Create GitHub App at Settings > Developer settings > GitHub Apps
-    - Set webhook URL to: https://{tailscale-hostname}/hooks/github-pr
+[ ] Create GitHub App (recommended: CLI manifest flow in github-hooks.md)
+    - Set webhook URL to: {public-relay-base-url}/hooks/github-pr
     - Set webhook secret to value in .env
-    - Install on your account/org
+    - Do not set callback URL unless OAuth auth flow is required
+    - Install on your account/org (all repos or selected repos)
+[ ] Download/store GitHub App private key securely and set path in .env
 [ ] Create Linear webhook at Settings > API > Webhooks
-    - Set URL to: https://{tailscale-hostname}/hooks/linear
+    - Set URL to: {public-relay-base-url}/hooks/linear
     - Set secret to value in .env
 [ ] Copy .env values to your deployment
 [ ] Copy openclaw-hooks.yaml into your OpenClaw config
 [ ] Copy transforms/ into ~/.openclaw/hooks/transforms/
 [ ] Start: webhook -hooks hooks.yaml -verbose -port 9000
 [ ] Expose via Tailscale: tailscale funnel --bg 9000
+[ ] Verify OpenClaw is not internet-exposed (bind localhost/private network only)
 [ ] Test with: gh webhook forward (see github-hooks.md)
 ```
 
@@ -108,5 +138,7 @@ Setup checklist:
   - Both sources (GitHub + Linear)
   - Colocated OpenClaw (localhost:3000)
   - Tailscale Funnel for ingress
+  - Single public relay host and single ingress service (`webhook` on one port)
+  - No GitHub OAuth callback URL unless explicitly required
   - Default agent ID (`coder`)
   - Target directory: `./hooks/`

@@ -3,6 +3,10 @@
 ## Table of Contents
 - [Agent Identity](#agent-identity)
 - [GitHub App Setup](#github-app-setup)
+- [URL Model (Single-Port Hardening)](#url-model-single-port-hardening)
+- [Required Inputs](#required-inputs)
+- [Create the App via gh CLI (Manifest)](#create-the-app-via-gh-cli-manifest)
+- [Create the App in Web UI (Fallback)](#create-the-app-in-web-ui-fallback)
 - [Events to Subscribe](#events-to-subscribe)
 - [Webhook Delivery Levels](#webhook-delivery-levels)
 - [Hook Definition](#hook-definition)
@@ -33,19 +37,152 @@ The GitHub App is both the webhook delivery mechanism and the agent's identity. 
 - Uses installation access tokens that auto-expire (1 hour)
 - Has its own bot identity: `app-name[bot]`
 
-### Create the App
+### URL Model (Single-Port Hardening)
+
+Use one public relay base URL and keep OpenClaw private:
+- Public ingress only to `adnanh/webhook` (single exposed service)
+- Keep OpenClaw on `localhost` or private tailnet interface (not internet-facing)
+- Use path-based routes on the same host:
+  - `https://<relay-host>/hooks/github-pr`
+  - `https://<relay-host>/hooks/linear`
+  - Manifest setup redirect (CLI flow): `https://<relay-host>/auth/github/manifest`
+  - Optional OAuth callback only if needed: `https://<relay-host>/auth/github/callback`
+
+`Webhook URL` receives GitHub webhook deliveries. `Callback URL` is only for OAuth redirects and should be omitted unless OAuth login is required.
+
+### Required Inputs
+
+Collect these values before creating the app:
+
+| Input | Required | Notes |
+|------|----------|-------|
+| App owner (personal/org) | Yes | Determines where the app is created |
+| App name | Yes | Bot identity becomes `name[bot]` |
+| Homepage URL | Yes | Project/app URL |
+| Webhook URL | Yes | Usually `https://<relay-host>/hooks/github-pr` |
+| Webhook secret | Yes | `GITHUB_WEBHOOK_SECRET` |
+| Permissions | Yes | Default: PR `write`, contents `read`, metadata `read` |
+| Events | Yes | See [Events to Subscribe](#events-to-subscribe) |
+| App visibility (`public`) | Yes | `false` for private/internal by default |
+| Manifest redirect URL | Yes (CLI flow) | Receives temporary `code` used by `/app-manifests/{code}/conversions` |
+| OAuth callback URLs | No | Set only when OAuth login flow is required |
+| Install scope (all vs selected repos) | Yes | Security choice; selected repos is tighter |
+
+### Create the App via gh CLI (Manifest)
+
+GitHub CLI has no `gh app create` subcommand. Use `gh api` with the GitHub App manifest flow:
+
+```bash
+# 0) Authenticate gh
+gh auth status || gh auth login -h github.com
+
+# 1) Set required values
+APP_NAME="openclaw-coder"
+APP_HOMEPAGE_URL="https://example.com"
+RELAY_BASE_URL="https://your-machine.tail-net.ts.net"
+WEBHOOK_URL="${RELAY_BASE_URL}/hooks/github-pr"
+WEBHOOK_SECRET="${GITHUB_WEBHOOK_SECRET}"
+MANIFEST_REDIRECT_URL="${RELAY_BASE_URL}/auth/github/manifest"
+APP_PUBLIC=false
+
+# Optional: set only if OAuth login is required
+CALLBACK_URL=""
+
+# Optional: set org slug if creating app under an org
+APP_OWNER_ORG=""
+
+MANIFEST_PATH="/tmp/github-app-manifest.json"
+
+# 2) Build manifest JSON (omit callback_urls unless OAuth is needed)
+if [[ -n "${CALLBACK_URL}" ]]; then
+  cat >"${MANIFEST_PATH}" <<JSON
+{
+  "name": "${APP_NAME}",
+  "url": "${APP_HOMEPAGE_URL}",
+  "public": ${APP_PUBLIC},
+  "webhook_secret": "${WEBHOOK_SECRET}",
+  "redirect_url": "${MANIFEST_REDIRECT_URL}",
+  "hook_attributes": {"url": "${WEBHOOK_URL}", "active": true},
+  "callback_urls": ["${CALLBACK_URL}"],
+  "default_permissions": {
+    "pull_requests": "write",
+    "contents": "read",
+    "metadata": "read"
+  },
+  "default_events": [
+    "pull_request",
+    "pull_request_review",
+    "pull_request_review_comment",
+    "pull_request_review_thread",
+    "issue_comment"
+  ]
+}
+JSON
+else
+  cat >"${MANIFEST_PATH}" <<JSON
+{
+  "name": "${APP_NAME}",
+  "url": "${APP_HOMEPAGE_URL}",
+  "public": ${APP_PUBLIC},
+  "webhook_secret": "${WEBHOOK_SECRET}",
+  "redirect_url": "${MANIFEST_REDIRECT_URL}",
+  "hook_attributes": {"url": "${WEBHOOK_URL}", "active": true},
+  "default_permissions": {
+    "pull_requests": "write",
+    "contents": "read",
+    "metadata": "read"
+  },
+  "default_events": [
+    "pull_request",
+    "pull_request_review",
+    "pull_request_review_comment",
+    "pull_request_review_thread",
+    "issue_comment"
+  ]
+}
+JSON
+fi
+
+# 3) Open manifest registration URL
+STATE="$(openssl rand -hex 16)"
+ENCODED_MANIFEST="$(jq -Rs @uri < "${MANIFEST_PATH}")"
+MANIFEST_BASE_URL="https://github.com/settings/apps/new"
+if [[ -n "${APP_OWNER_ORG}" ]]; then
+  MANIFEST_BASE_URL="https://github.com/organizations/${APP_OWNER_ORG}/settings/apps/new"
+fi
+MANIFEST_URL="${MANIFEST_BASE_URL}?state=${STATE}&manifest=${ENCODED_MANIFEST}"
+echo "${MANIFEST_URL}"
+
+# macOS convenience:
+open "${MANIFEST_URL}"
+
+# 4) After browser flow, copy ?code=<...> from manifest redirect URL and convert
+CODE="paste_manifest_code_here"
+gh api --method POST "/app-manifests/${CODE}/conversions" > /tmp/github-app-created.json
+
+# 5) Inspect returned fields and store app metadata
+jq -r '.id' /tmp/github-app-created.json
+```
+
+After conversion, collect/store:
+- App ID (`GITHUB_APP_ID`)
+- Client ID / Client Secret (only needed if OAuth flow is enabled)
+- PEM private key (`GITHUB_APP_PRIVATE_KEY`)
+
+### Create the App in Web UI (Fallback)
 
 1. Go to **Settings > Developer settings > GitHub Apps > New GitHub App**
 2. Set:
    - **App name**: `openclaw-coder` (or your preferred name)
    - **Homepage URL**: your project URL
-   - **Webhook URL**: `https://your-machine.tail-net.ts.net/hooks/github-pr`
+   - **Webhook URL**: `https://<relay-host>/hooks/github-pr`
    - **Webhook secret**: value of `GITHUB_WEBHOOK_SECRET`
    - **Permissions**:
      - Pull requests: **Read & write** (post reviews, comments)
      - Contents: **Read-only** (read PR diffs)
      - Metadata: **Read-only** (required)
    - **Subscribe to events**: see [Events to Subscribe](#events-to-subscribe)
+   - **Callback URL**: leave empty unless OAuth login is required
 3. Create the app
 4. Generate a **private key** (downloads `.pem` file) — store securely
 5. Note the **App ID** and **Installation ID** (shown after installing)
