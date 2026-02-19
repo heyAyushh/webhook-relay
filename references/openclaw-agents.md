@@ -2,6 +2,8 @@
 
 Once webhooks reach OpenClaw via the relay pipeline (see [openclaw-relay.md](openclaw-relay.md)), the gateway invokes the `coder` agent. Both GitHub and Linear events route to the same agent — the transforms provide different context (code review vs project management), but the agent is unified.
 
+OpenClaw agents also support **sub-agents** (e.g. dedicated GitHub and Linear agents that proactively watch and interact with the relay, using an existing agent or spawning one if not present). See [openclaw-subagents.md](openclaw-subagents.md).
+
 ## Agent Config Directory
 
 ```
@@ -78,12 +80,16 @@ Periodic wake-ups independent of webhook events. Catches stale work.
 
 ### AGENTS.md — Multi-agent coordination
 
-If running a single `coder` agent, this file may be empty or reference external agents.
+List other agents this one can delegate to. For sub-agent setups (GitHub/Linear), reference the dedicated agents here.
 
 ```markdown
 # Agents
 
-(No other agents configured — coder handles both code review and project management.)
+## Sub-agents (optional)
+- github-coder — GitHub PR/review; proactively watches relay, reviews and comments; spawn or use existing.
+- linear-coder — Linear issues/comments; proactively watches relay, triages and updates; spawn or use existing.
+
+(If not using sub-agents: coder handles both code review and project management.)
 ```
 
 ### TOOLS.md — Capabilities and auth

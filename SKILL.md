@@ -12,7 +12,8 @@ description: >
   (6) OpenClaw hooks.mappings config and transform modules,
   (7) Local development with gh webhook forward,
   (8) Interactive first-time setup wizard,
-  (9) OpenClaw agent config (SOUL.md, HEARTBEAT.md, TOOLS.md, MEMORY.md, etc.).
+  (9) OpenClaw agent config (SOUL.md, HEARTBEAT.md, TOOLS.md, MEMORY.md, etc.),
+  (10) OpenClaw sub-agents for GitHub and Linear (proactive watch/interact with relay, use existing or spawn).
 ---
 
 # adnanh/webhook
@@ -113,6 +114,7 @@ Rules compose with `and`, `or`, `not` operators (nestable).
 - **Linear issue/comment hooks**: [references/linear-hooks.md](references/linear-hooks.md)
 - **OpenClaw relay pattern**: [references/openclaw-relay.md](references/openclaw-relay.md)
 - **OpenClaw agent config (SOUL.md, HEARTBEAT.md, etc.)**: [references/openclaw-agents.md](references/openclaw-agents.md)
+- **OpenClaw sub-agents (GitHub & Linear)**: [references/openclaw-subagents.md](references/openclaw-subagents.md)
 - **Payload sanitization (prompt injection defense)**: [references/payload-sanitization.md](references/payload-sanitization.md)
 - **Tailscale deployment**: [references/tailscale.md](references/tailscale.md)
 
