@@ -1,0 +1,114 @@
+- id: github-pr
+  execute-command: /Users/ay/Documents/codes/webhook-relay/scripts/relay-github.sh
+  command-working-directory: /Users/ay/Documents/codes/webhook-relay
+  response-message: accepted
+  http-methods: [POST]
+  include-command-output-in-response: false
+  pass-environment-to-command:
+    - source: header
+      name: X-GitHub-Event
+      envname: GITHUB_EVENT
+    - source: header
+      name: X-GitHub-Delivery
+      envname: GITHUB_DELIVERY
+    - source: payload
+      name: action
+      envname: GITHUB_ACTION
+    - source: payload
+      name: repository.full_name
+      envname: GITHUB_REPO
+    - source: payload
+      name: pull_request.number
+      envname: GITHUB_PR_NUMBER
+    - source: payload
+      name: sender.login
+      envname: GITHUB_SENDER
+    - source: payload
+      name: installation.id
+      envname: GITHUB_INSTALLATION_ID
+    - source: entire-payload
+      envname: GITHUB_PAYLOAD
+  trigger-rule:
+    and:
+      - match:
+          type: payload-hmac-sha256
+          secret: "{{ getenv \"GITHUB_WEBHOOK_SECRET\" }}"
+          parameter:
+            source: header
+            name: X-Hub-Signature-256
+      - or:
+          - match:
+              type: value
+              value: pull_request
+              parameter:
+                source: header
+                name: X-GitHub-Event
+          - match:
+              type: value
+              value: pull_request_review
+              parameter:
+                source: header
+                name: X-GitHub-Event
+          - match:
+              type: value
+              value: pull_request_review_comment
+              parameter:
+                source: header
+                name: X-GitHub-Event
+          - match:
+              type: value
+              value: issue_comment
+              parameter:
+                source: header
+                name: X-GitHub-Event
+      - match:
+          type: regex
+          regex: "^(opened|synchronize|reopened|submitted|created)$"
+          parameter:
+            source: payload
+            name: action
+
+- id: linear
+  execute-command: /Users/ay/Documents/codes/webhook-relay/scripts/relay-linear.sh
+  command-working-directory: /Users/ay/Documents/codes/webhook-relay
+  response-message: accepted
+  http-methods: [POST]
+  include-command-output-in-response: false
+  pass-environment-to-command:
+    - source: header
+      name: Linear-Signature
+      envname: LINEAR_SIGNATURE
+    - source: header
+      name: Linear-Delivery
+      envname: LINEAR_DELIVERY
+    - source: payload
+      name: type
+      envname: LINEAR_EVENT_TYPE
+    - source: payload
+      name: action
+      envname: LINEAR_ACTION
+    - source: payload
+      name: data.id
+      envname: LINEAR_ENTITY_ID
+    - source: payload
+      name: data.team.key
+      envname: LINEAR_TEAM_KEY
+    - source: payload
+      name: data.userId
+      envname: LINEAR_ACTOR_ID
+    - source: entire-payload
+      envname: LINEAR_PAYLOAD
+  trigger-rule:
+    or:
+      - match:
+          type: value
+          value: Issue
+          parameter:
+            source: payload
+            name: type
+      - match:
+          type: value
+          value: Comment
+          parameter:
+            source: payload
+            name: type
