@@ -228,7 +228,7 @@ fn event_type_for_source(
 ) -> Result<String, ValidationError> {
     match source {
         Source::Github => github::event_type(headers, payload),
-        Source::Linear => linear::event_type(payload),
+        Source::Linear => linear::event_type(headers, payload),
     }
 }
 

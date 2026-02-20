@@ -104,4 +104,99 @@ mod tests {
         let payload = json!({});
         assert_eq!(event_type(&headers, &payload).expect("event type"), "ping");
     }
+
+    #[test]
+    fn accepts_all_documented_github_app_events() {
+        // Source: https://docs.github.com/en/webhooks/webhook-events-and-payloads
+        const DOCUMENTED_EVENTS: &[&str] = &[
+            "branch_protection_configuration",
+            "branch_protection_rule",
+            "check_run",
+            "check_suite",
+            "code_scanning_alert",
+            "commit_comment",
+            "create",
+            "custom_property",
+            "custom_property_values",
+            "delete",
+            "dependabot_alert",
+            "deploy_key",
+            "deployment",
+            "deployment_protection_rule",
+            "deployment_review",
+            "deployment_status",
+            "discussion",
+            "discussion_comment",
+            "fork",
+            "github_app_authorization",
+            "gollum",
+            "installation",
+            "installation_repositories",
+            "installation_target",
+            "issue_comment",
+            "issues",
+            "label",
+            "marketplace_purchase",
+            "member",
+            "membership",
+            "merge_group",
+            "meta",
+            "milestone",
+            "org_block",
+            "organization",
+            "package",
+            "page_build",
+            "personal_access_token_request",
+            "ping",
+            "project",
+            "project_card",
+            "project_column",
+            "projects_v2",
+            "projects_v2_item",
+            "public",
+            "pull_request",
+            "pull_request_review",
+            "pull_request_review_comment",
+            "pull_request_review_thread",
+            "push",
+            "registry_package",
+            "release",
+            "repository",
+            "repository_advisory",
+            "repository_dispatch",
+            "repository_import",
+            "repository_ruleset",
+            "repository_vulnerability_alert",
+            "secret_scanning_alert",
+            "secret_scanning_alert_location",
+            "secret_scanning_scan",
+            "security_advisory",
+            "security_and_analysis",
+            "sponsorship",
+            "star",
+            "status",
+            "sub_issues",
+            "team",
+            "team_add",
+            "watch",
+            "workflow_dispatch",
+            "workflow_job",
+            "workflow_run",
+        ];
+
+        let payload = json!({});
+        for event in DOCUMENTED_EVENTS {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                GITHUB_EVENT_HEADER,
+                HeaderValue::from_str(event).expect("valid github event header"),
+            );
+
+            assert_eq!(
+                event_type(&headers, &payload).expect("event type"),
+                *event,
+                "failed for github event {event}"
+            );
+        }
+    }
 }

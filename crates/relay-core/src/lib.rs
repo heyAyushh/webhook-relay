@@ -1,4 +1,3 @@
-pub mod filters;
 pub mod keys;
 pub mod model;
 pub mod sanitize;

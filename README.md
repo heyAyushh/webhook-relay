@@ -43,7 +43,18 @@ Behavior:
 Event compatibility:
 
 - GitHub: any `X-GitHub-Event` is accepted; `action` is appended when present.
-- Linear: any `type` is accepted; `action` is appended when present.
+- Linear: any `type` is accepted; if `type` is missing, `Linear-Event` header is used; `action` is appended when present.
+
+Compatibility references:
+
+- GitHub events: <https://docs.github.com/en/webhooks/webhook-events-and-payloads>
+- Linear webhooks: <https://linear.app/developers/webhooks>
+- Linear schema objects: <https://studio.apollographql.com/public/Linear-Webhooks/variant/current/schema/reference/objects>
+
+Compatibility tests:
+
+- `src/sources/github.rs` -> `accepts_all_documented_github_app_events`
+- `src/sources/linear.rs` -> `accepts_all_documented_linear_webhook_types`
 
 Other endpoints:
 

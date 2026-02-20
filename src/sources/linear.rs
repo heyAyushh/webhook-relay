@@ -16,12 +16,14 @@ pub fn validate(secret: &str, headers: &HeaderMap, body: &[u8]) -> Result<(), Va
     }
 }
 
-pub fn event_type(payload: &Value) -> Result<String, ValidationError> {
+pub fn event_type(headers: &HeaderMap, payload: &Value) -> Result<String, ValidationError> {
     let linear_type = payload
         .get("type")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| header_string(headers, "Linear-Event"))
         .ok_or(ValidationError::BadRequest("missing linear type"))?;
 
     let action = payload
@@ -75,25 +77,78 @@ mod tests {
 
     #[test]
     fn extracts_type_and_action() {
+        let headers = HeaderMap::new();
         let payload = json!({"type":"Issue","action":"create"});
         assert_eq!(
-            event_type(&payload).expect("linear event type"),
+            event_type(&headers, &payload).expect("linear event type"),
             "issue.create"
         );
     }
 
     #[test]
     fn accepts_type_without_action() {
+        let headers = HeaderMap::new();
         let payload = json!({"type":"Project"});
-        assert_eq!(event_type(&payload).expect("linear event type"), "project");
+        assert_eq!(
+            event_type(&headers, &payload).expect("linear event type"),
+            "project"
+        );
     }
 
     #[test]
     fn accepts_arbitrary_type_and_action_values() {
+        let headers = HeaderMap::new();
         let payload = json!({"type":"RoadmapUpdate","action":"Archived"});
         assert_eq!(
-            event_type(&payload).expect("linear event type"),
+            event_type(&headers, &payload).expect("linear event type"),
             "roadmapupdate.archived"
         );
+    }
+
+    #[test]
+    fn falls_back_to_linear_event_header_when_type_is_missing() {
+        let mut headers = HeaderMap::new();
+        headers.insert("Linear-Event", HeaderValue::from_static("Issue"));
+
+        let payload = json!({"action":"create"});
+        assert_eq!(
+            event_type(&headers, &payload).expect("linear event type"),
+            "issue.create"
+        );
+    }
+
+    #[test]
+    fn accepts_all_documented_linear_webhook_types() {
+        // Sources:
+        // - https://linear.app/developers/webhooks
+        // - https://studio.apollographql.com/public/Linear-Webhooks/variant/current/schema/reference/objects
+        const DOCUMENTED_TYPES: &[&str] = &[
+            "Comment",
+            "Cycle",
+            "Customer",
+            "CustomerRequest",
+            "Document",
+            "Initiative",
+            "InitiativeUpdate",
+            "Issue",
+            "IssueAttachment",
+            "IssueLabel",
+            "IssueSLA",
+            "OAuthApp",
+            "Project",
+            "ProjectUpdate",
+            "Reaction",
+            "User",
+        ];
+
+        let headers = HeaderMap::new();
+        for linear_type in DOCUMENTED_TYPES {
+            let payload = json!({"type": linear_type, "action":"create"});
+            assert_eq!(
+                event_type(&headers, &payload).expect("linear event type"),
+                format!("{}.create", linear_type.to_ascii_lowercase()),
+                "failed for linear type {linear_type}"
+            );
+        }
     }
 }
