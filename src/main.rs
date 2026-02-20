@@ -5,7 +5,12 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use relay_core::keys::{
+    github_cooldown_key, github_dedup_key, linear_cooldown_key, linear_dedup_key,
+};
 use relay_core::model::Source;
+use relay_core::sanitize::sanitize_payload;
+use relay_core::timestamps::verify_linear_timestamp_window;
 use serde_json::{Value, json};
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -13,13 +18,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
+use tokio::time::{Duration, timeout};
 use tower_governor::GovernorLayer;
 use tower_governor::governor::GovernorConfigBuilder;
-use tower_governor::key_extractor::SmartIpKeyExtractor;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
+use webhook_relay::client_ip::TrustedClientIpKeyExtractor;
 use webhook_relay::config::Config;
 use webhook_relay::envelope::build_envelope;
+use webhook_relay::idempotency::{IdempotencyDecision, IdempotencyStore};
 use webhook_relay::middleware::SourceRateLimiter;
 use webhook_relay::producer::{
     KafkaPublisher, PublishJob, ensure_required_topics, run_publish_worker,
@@ -31,6 +38,7 @@ struct AppState {
     config: Config,
     publish_tx: mpsc::Sender<PublishJob>,
     source_rate_limiter: SourceRateLimiter,
+    idempotency_store: IdempotencyStore,
     publish_worker_alive: Arc<AtomicBool>,
 }
 
@@ -54,14 +62,19 @@ async fn main() -> Result<()> {
 
     let state = Arc::new(AppState {
         source_rate_limiter: SourceRateLimiter::new(config.source_limit_per_minute),
+        idempotency_store: IdempotencyStore::new(config.dedup_ttl_seconds, config.cooldown_seconds),
         config,
         publish_tx,
         publish_worker_alive,
     });
 
     let period_ms = ip_refill_period_ms(state.config.ip_limit_per_minute);
+    let ip_key_extractor = TrustedClientIpKeyExtractor::new(
+        state.config.trust_proxy_headers,
+        state.config.trusted_proxy_cidrs.clone(),
+    );
     let mut governor_builder = GovernorConfigBuilder::default()
-        .key_extractor(SmartIpKeyExtractor)
+        .key_extractor(ip_key_extractor)
         .use_headers();
     governor_builder
         .per_millisecond(period_ms)
@@ -85,7 +98,12 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("bind {}", state.config.bind_addr))?;
 
-    info!(bind = %state.config.bind_addr, "webhook relay listening");
+    info!(
+        bind = %state.config.bind_addr,
+        trust_proxy_headers = state.config.trust_proxy_headers,
+        trusted_proxy_cidrs = ?state.config.trusted_proxy_cidrs,
+        "webhook relay listening"
+    );
 
     let server = axum::serve(
         listener,
@@ -98,8 +116,15 @@ async fn main() -> Result<()> {
     server.await.context("serve webhook relay")?;
 
     drop(state);
-    publish_worker_handle.abort();
-    let _ = publish_worker_handle.await;
+    match timeout(Duration::from_secs(30), publish_worker_handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            warn!(error = %error, "publish worker exited with join error");
+        }
+        Err(_) => {
+            warn!("timed out waiting for publish worker drain during shutdown");
+        }
+    }
 
     Ok(())
 }
@@ -156,6 +181,24 @@ async fn webhook_handler(
         }
     };
 
+    if source == Source::Linear
+        && !verify_linear_timestamp_window(
+            &payload,
+            epoch_seconds(),
+            state.config.linear_timestamp_window_seconds,
+            state.config.enforce_linear_timestamp_window,
+        )
+    {
+        warn!(
+            remote = %remote_addr.ip(),
+            "linear webhook rejected due to timestamp window check"
+        );
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error":"unauthorized"})),
+        );
+    }
+
     let event_type = match event_type_for_source(source, &headers, &payload) {
         Ok(event_type) => event_type,
         Err(ValidationError::BadRequest(message)) => {
@@ -169,7 +212,55 @@ async fn webhook_handler(
         }
     };
 
-    let envelope = build_envelope(source, event_type, payload);
+    let dedup_key = match dedup_key_for_source(source, &headers, &payload) {
+        Ok(key) => key,
+        Err(ValidationError::BadRequest(message)) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": message})));
+        }
+        Err(ValidationError::Unauthorized(_)) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "unauthorized"})),
+            );
+        }
+    };
+    let cooldown_key = cooldown_key_for_source(source, &payload);
+    match state
+        .idempotency_store
+        .check(&dedup_key, cooldown_key.as_deref(), epoch_seconds())
+    {
+        IdempotencyDecision::Accept => {}
+        IdempotencyDecision::Duplicate => {
+            return (
+                StatusCode::OK,
+                Json(json!({"status":"ignored","reason":"duplicate"})),
+            );
+        }
+        IdempotencyDecision::Cooldown => {
+            return (
+                StatusCode::OK,
+                Json(json!({"status":"ignored","reason":"cooldown"})),
+            );
+        }
+    }
+
+    let sanitized_payload = match sanitize_payload(source.as_str(), &payload) {
+        Ok(sanitized_payload) => sanitized_payload,
+        Err(error) => {
+            warn!(
+                source = source.as_str(),
+                remote = %remote_addr.ip(),
+                reason = %error,
+                "payload sanitizer rejected request"
+            );
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":"invalid payload"})),
+            );
+        }
+    };
+
+    let envelope = build_envelope(source, event_type, sanitized_payload);
     let topic = source.topic_name().to_string();
 
     let event_id = envelope.id.clone();
@@ -232,6 +323,100 @@ fn event_type_for_source(
     }
 }
 
+fn dedup_key_for_source(
+    source: Source,
+    headers: &HeaderMap,
+    payload: &Value,
+) -> Result<String, ValidationError> {
+    match source {
+        Source::Github => {
+            let delivery_id = header_value(headers, "X-GitHub-Delivery")
+                .ok_or(ValidationError::BadRequest("missing X-GitHub-Delivery"))?;
+            let action =
+                payload_token(payload, &["action"]).unwrap_or_else(|| "unknown".to_string());
+            let entity_id = github_entity_id(payload);
+            Ok(github_dedup_key(&delivery_id, &action, &entity_id))
+        }
+        Source::Linear => {
+            let delivery_id = header_value(headers, "Linear-Delivery")
+                .ok_or(ValidationError::BadRequest("missing Linear-Delivery"))?;
+            let action =
+                payload_token(payload, &["action"]).unwrap_or_else(|| "unknown".to_string());
+            let entity_id = linear_entity_id(payload);
+            Ok(linear_dedup_key(&delivery_id, &action, &entity_id))
+        }
+    }
+}
+
+fn cooldown_key_for_source(source: Source, payload: &Value) -> Option<String> {
+    match source {
+        Source::Github => {
+            let repo = payload_token(payload, &["repository", "full_name"])?;
+            let entity_id = github_entity_id_for_cooldown(payload)?;
+            Some(github_cooldown_key(&repo, &entity_id))
+        }
+        Source::Linear => {
+            let team_key = payload_token(payload, &["data", "team", "key"])?;
+            let entity_id = linear_entity_id_for_cooldown(payload)?;
+            Some(linear_cooldown_key(&team_key, &entity_id))
+        }
+    }
+}
+
+fn github_entity_id(payload: &Value) -> String {
+    github_entity_id_for_cooldown(payload)
+        .or_else(|| payload_token(payload, &["comment", "id"]))
+        .or_else(|| payload_token(payload, &["review", "id"]))
+        .or_else(|| payload_token(payload, &["repository", "id"]))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn github_entity_id_for_cooldown(payload: &Value) -> Option<String> {
+    payload_token(payload, &["pull_request", "number"])
+        .or_else(|| payload_token(payload, &["issue", "number"]))
+        .or_else(|| payload_token(payload, &["number"]))
+}
+
+fn linear_entity_id(payload: &Value) -> String {
+    linear_entity_id_for_cooldown(payload)
+        .or_else(|| payload_token(payload, &["webhookId"]))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn linear_entity_id_for_cooldown(payload: &Value) -> Option<String> {
+    payload_token(payload, &["data", "id"])
+        .or_else(|| payload_token(payload, &["data", "identifier"]))
+}
+
+fn payload_token(payload: &Value, path: &[&str]) -> Option<String> {
+    let mut current = payload;
+    for segment in path {
+        current = current.get(*segment)?;
+    }
+
+    if let Some(value) = current.as_str() {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    } else if let Some(value) = current.as_i64() {
+        Some(value.to_string())
+    } else {
+        current.as_u64().map(|value| value.to_string())
+    }
+}
+
+fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
 fn ip_refill_period_ms(limit_per_minute: u32) -> u64 {
     if limit_per_minute == 0 {
         return 1;
@@ -255,10 +440,35 @@ fn setup_tracing() {
 
 #[cfg(test)]
 mod tests {
-    use super::ip_refill_period_ms;
+    use super::{github_entity_id, ip_refill_period_ms, linear_entity_id, payload_token};
+    use serde_json::json;
 
     #[test]
     fn ip_limit_refill_period_matches_100_per_minute() {
         assert_eq!(ip_refill_period_ms(100), 600);
+    }
+
+    #[test]
+    fn github_entity_id_prefers_pull_request_number() {
+        let payload = json!({
+            "pull_request": {"number": 42},
+            "number": 99
+        });
+        assert_eq!(github_entity_id(&payload), "42");
+    }
+
+    #[test]
+    fn linear_entity_id_prefers_data_id() {
+        let payload = json!({
+            "data": {"id": "issue-42"},
+            "webhookId": "hook-1"
+        });
+        assert_eq!(linear_entity_id(&payload), "issue-42");
+    }
+
+    #[test]
+    fn payload_token_reads_integer_paths() {
+        let payload = json!({"x":{"y":123}});
+        assert_eq!(payload_token(&payload, &["x", "y"]).as_deref(), Some("123"));
     }
 }

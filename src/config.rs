@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, anyhow};
+use ipnet::IpNet;
 use std::env;
 
 #[derive(Debug, Clone)]
@@ -17,6 +18,12 @@ pub struct Config {
     pub max_payload_bytes: usize,
     pub ip_limit_per_minute: u32,
     pub source_limit_per_minute: u32,
+    pub trust_proxy_headers: bool,
+    pub trusted_proxy_cidrs: Vec<IpNet>,
+    pub dedup_ttl_seconds: i64,
+    pub cooldown_seconds: i64,
+    pub enforce_linear_timestamp_window: bool,
+    pub linear_timestamp_window_seconds: i64,
     pub publish_queue_capacity: usize,
     pub publish_max_retries: u32,
     pub publish_backoff_base_ms: u64,
@@ -41,6 +48,15 @@ impl Config {
             max_payload_bytes: env_usize("RELAY_MAX_PAYLOAD_BYTES", 1_048_576)?,
             ip_limit_per_minute: env_u32("RELAY_IP_RATE_PER_MINUTE", 100)?,
             source_limit_per_minute: env_u32("RELAY_SOURCE_RATE_PER_MINUTE", 500)?,
+            trust_proxy_headers: env_bool("RELAY_TRUST_PROXY_HEADERS", false),
+            trusted_proxy_cidrs: env_cidrs("RELAY_TRUSTED_PROXY_CIDRS", "127.0.0.1/32,::1/128")?,
+            dedup_ttl_seconds: env_i64("RELAY_DEDUP_TTL_SECONDS", 604_800)?,
+            cooldown_seconds: env_i64("RELAY_COOLDOWN_SECONDS", 30)?,
+            enforce_linear_timestamp_window: env_bool(
+                "RELAY_ENFORCE_LINEAR_TIMESTAMP_WINDOW",
+                true,
+            ),
+            linear_timestamp_window_seconds: env_i64("RELAY_LINEAR_TIMESTAMP_WINDOW_SECONDS", 60)?,
             publish_queue_capacity: env_usize("RELAY_PUBLISH_QUEUE_CAPACITY", 4096)?,
             publish_max_retries: env_u32("RELAY_PUBLISH_MAX_RETRIES", 5)?,
             publish_backoff_base_ms: env_u64("RELAY_PUBLISH_BACKOFF_BASE_MS", 200)?,
@@ -54,6 +70,28 @@ impl Config {
         if config.kafka_topic_replication_factor <= 0 {
             return Err(anyhow!(
                 "KAFKA_TOPIC_REPLICATION_FACTOR must be a positive integer"
+            ));
+        }
+
+        if config.dedup_ttl_seconds <= 0 {
+            return Err(anyhow!(
+                "RELAY_DEDUP_TTL_SECONDS must be a positive integer"
+            ));
+        }
+
+        if config.cooldown_seconds <= 0 {
+            return Err(anyhow!("RELAY_COOLDOWN_SECONDS must be a positive integer"));
+        }
+
+        if config.linear_timestamp_window_seconds <= 0 {
+            return Err(anyhow!(
+                "RELAY_LINEAR_TIMESTAMP_WINDOW_SECONDS must be a positive integer"
+            ));
+        }
+
+        if config.trust_proxy_headers && config.trusted_proxy_cidrs.is_empty() {
+            return Err(anyhow!(
+                "RELAY_TRUSTED_PROXY_CIDRS cannot be empty when RELAY_TRUST_PROXY_HEADERS is enabled"
             ));
         }
 
@@ -108,6 +146,19 @@ fn env_i32(name: &str, default: i32) -> Result<i32> {
         .map(|value| value.unwrap_or(default))
 }
 
+fn env_i64(name: &str, default: i64) -> Result<i64> {
+    env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| {
+            value
+                .parse::<i64>()
+                .with_context(|| format!("invalid i64 for {name}"))
+        })
+        .transpose()
+        .map(|value| value.unwrap_or(default))
+}
+
 fn env_usize(name: &str, default: usize) -> Result<usize> {
     env::var(name)
         .ok()
@@ -129,4 +180,17 @@ fn env_bool(name: &str, default: bool) -> bool {
         ),
         Err(_) => default,
     }
+}
+
+fn env_cidrs(name: &str, default: &str) -> Result<Vec<IpNet>> {
+    let raw = env::var(name).unwrap_or_else(|_| default.to_string());
+    raw.split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value
+                .parse::<IpNet>()
+                .with_context(|| format!("invalid CIDR for {name}: {value}"))
+        })
+        .collect()
 }
