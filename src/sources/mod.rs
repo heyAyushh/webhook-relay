@@ -1,5 +1,4 @@
 pub mod github;
-pub mod gmail;
 pub mod linear;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -21,8 +21,10 @@ use tracing_subscriber::EnvFilter;
 use webhook_relay::config::Config;
 use webhook_relay::envelope::build_envelope;
 use webhook_relay::middleware::SourceRateLimiter;
-use webhook_relay::producer::{KafkaPublisher, PublishJob, run_publish_worker};
-use webhook_relay::sources::{ValidationError, github, gmail, linear};
+use webhook_relay::producer::{
+    KafkaPublisher, PublishJob, ensure_required_topics, run_publish_worker,
+};
+use webhook_relay::sources::{ValidationError, github, linear};
 
 #[derive(Clone)]
 struct AppState {
@@ -37,6 +39,9 @@ async fn main() -> Result<()> {
     setup_tracing();
 
     let config = Config::from_env().context("load relay config")?;
+    ensure_required_topics(&config)
+        .await
+        .context("ensure kafka topics")?;
     let publisher = KafkaPublisher::from_config(&config).context("initialize kafka producer")?;
 
     let (publish_tx, publish_rx) = mpsc::channel(config.publish_queue_capacity);
@@ -213,7 +218,6 @@ fn validate_source(
     match source {
         Source::Github => github::validate(&config.hmac_secret_github, headers, body),
         Source::Linear => linear::validate(&config.hmac_secret_linear, headers, body),
-        Source::Gmail => gmail::validate(&config.hmac_secret_gmail, headers),
     }
 }
 
@@ -225,7 +229,6 @@ fn event_type_for_source(
     match source {
         Source::Github => github::event_type(headers, payload),
         Source::Linear => linear::event_type(payload),
-        Source::Gmail => Ok(gmail::event_type(headers, payload)),
     }
 }
 

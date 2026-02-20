@@ -80,4 +80,28 @@ mod tests {
             "pull_request.opened"
         );
     }
+
+    #[test]
+    fn accepts_arbitrary_event_and_action_values() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            GITHUB_EVENT_HEADER,
+            HeaderValue::from_static("repository_dispatch"),
+        );
+
+        let payload = json!({"action":"custom_action"});
+        assert_eq!(
+            event_type(&headers, &payload).expect("event type"),
+            "repository_dispatch.custom_action"
+        );
+    }
+
+    #[test]
+    fn accepts_event_without_action() {
+        let mut headers = HeaderMap::new();
+        headers.insert(GITHUB_EVENT_HEADER, HeaderValue::from_static("ping"));
+
+        let payload = json!({});
+        assert_eq!(event_type(&headers, &payload).expect("event type"), "ping");
+    }
 }

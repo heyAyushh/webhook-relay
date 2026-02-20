@@ -31,15 +31,19 @@ Supported `source` values:
 
 - `github`
 - `linear`
-- `gmail`
 
 Behavior:
 
-- verifies source auth (`X-Hub-Signature-256`, `Linear-Signature`, `X-Goog-Token`)
+- verifies source auth (`X-Hub-Signature-256`, `Linear-Signature`)
 - parses JSON payload
 - derives `event_type`
 - publishes envelope to topic `webhooks.{source}` asynchronously
 - returns `200` fast when accepted
+
+Event compatibility:
+
+- GitHub: any `X-GitHub-Event` is accepted; `action` is appended when present.
+- Linear: any `type` is accepted; `action` is appended when present.
 
 Other endpoints:
 
@@ -82,7 +86,6 @@ Required values to set at minimum:
 - `KAFKA_BROKERS`
 - `HMAC_SECRET_GITHUB`
 - `HMAC_SECRET_LINEAR`
-- `HMAC_SECRET_GMAIL`
 - `OPENCLAW_WEBHOOK_TOKEN`
 
 ## Build and Test
@@ -99,6 +102,23 @@ Run:
 cargo test --workspace
 cargo build --workspace --release
 ```
+
+## Zero-Lift Init
+
+Bootstrap everything with one command:
+
+```bash
+scripts/init.sh --up
+```
+
+What this does:
+
+- creates `.env` from `.env.default` if missing
+- generates strong random secrets for placeholder values
+- generates AutoMQ mTLS certs via `scripts/gen-certs.sh`
+- generates local TLS certs for nginx (`certs/tls.crt`, `certs/tls.key`)
+- writes ready-to-use systemd env files to `deploy/env/`
+- optionally starts stack with `docker compose up --build -d`
 
 ## mTLS Certificates
 
