@@ -6,7 +6,7 @@
   - `main.rs`: Axum server, `/webhook/{source}`, health/readiness, rate limiting.
   - `producer.rs`: Kafka producer with retry/backoff worker.
   - `sources/`: source-specific auth + event extraction (`github`, `linear`).
-- `apps/automq-consumer/`: outbound-only consumer daemon.
+- `apps/kafka-openclaw-hook/`: outbound-only consumer daemon.
   - `consumer.rs`: Kafka consume loop and commit behavior.
   - `forwarder.rs`: POST `/hooks/agent` with retry policy.
   - `dlq.rs`: publish exhausted failures to DLQ topic.
@@ -24,7 +24,8 @@
 - Release build: `cargo build --workspace --release`
 - Generate mTLS certs: `scripts/gen-certs.sh`
 - Bootstrap full local setup: `scripts/init.sh --up`
-- Start stack: `docker compose up --build`
+- Start relay stack: `docker compose -f docker-compose.yml up --build`
+- Start relay dev override stack: `docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build`
 
 ## Coding Standards
 
