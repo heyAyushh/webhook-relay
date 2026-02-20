@@ -5,7 +5,7 @@
 - `src/`: `webhook-relay` ingress service.
   - `main.rs`: Axum server, `/webhook/{source}`, health/readiness, rate limiting.
   - `producer.rs`: Kafka producer with retry/backoff worker.
-  - `sources/`: source-specific auth + event extraction (`github`, `linear`, `gmail`).
+  - `sources/`: source-specific auth + event extraction (`github`, `linear`).
 - `apps/automq-consumer/`: outbound-only consumer daemon.
   - `consumer.rs`: Kafka consume loop and commit behavior.
   - `forwarder.rs`: POST `/hooks/agent` with retry policy.
@@ -23,6 +23,7 @@
 - Test: `cargo test --workspace`
 - Release build: `cargo build --workspace --release`
 - Generate mTLS certs: `scripts/gen-certs.sh`
+- Bootstrap full local setup: `scripts/init.sh --up`
 - Start stack: `docker compose up --build`
 
 ## Coding Standards
@@ -57,5 +58,5 @@
 
 ## Notes
 
-- Legacy shell/Python relay scripts are migration references only and not part of the Rust runtime path.
+- Legacy shell/Python relay scripts have been removed from the active runtime path.
 - If a requested skill like `$init` is not available in session skills, proceed with the closest manual equivalent and document the outcome.

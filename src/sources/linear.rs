@@ -28,10 +28,17 @@ pub fn event_type(payload: &Value) -> Result<String, ValidationError> {
         .get("action")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or(ValidationError::BadRequest("missing linear action"))?;
+        .filter(|value| !value.is_empty());
 
-    Ok(format!("{}.{}", linear_type.to_ascii_lowercase(), action))
+    let normalized_type = linear_type.to_ascii_lowercase();
+    match action {
+        Some(action) => Ok(format!(
+            "{}.{}",
+            normalized_type,
+            action.to_ascii_lowercase()
+        )),
+        None => Ok(normalized_type),
+    }
 }
 
 fn header_string(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -72,6 +79,21 @@ mod tests {
         assert_eq!(
             event_type(&payload).expect("linear event type"),
             "issue.create"
+        );
+    }
+
+    #[test]
+    fn accepts_type_without_action() {
+        let payload = json!({"type":"Project"});
+        assert_eq!(event_type(&payload).expect("linear event type"), "project");
+    }
+
+    #[test]
+    fn accepts_arbitrary_type_and_action_values() {
+        let payload = json!({"type":"RoadmapUpdate","action":"Archived"});
+        assert_eq!(
+            event_type(&payload).expect("linear event type"),
+            "roadmapupdate.archived"
         );
     }
 }

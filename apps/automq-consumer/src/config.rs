@@ -19,7 +19,8 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Result<Self> {
-        let kafka_topics_raw = required_env("KAFKA_TOPICS")?;
+        let kafka_topics_raw = env::var("KAFKA_TOPICS")
+            .unwrap_or_else(|_| "webhooks.github,webhooks.linear".to_string());
         let kafka_topics = kafka_topics_raw
             .split(',')
             .map(str::trim)

@@ -1,4 +1,6 @@
 /target
+.env
+deploy/env/*.env
 scripts/__pycache__/
 certs/*.crt
 certs/*.key

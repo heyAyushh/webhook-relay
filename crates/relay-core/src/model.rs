@@ -7,7 +7,6 @@ use std::str::FromStr;
 pub enum Source {
     Github,
     Linear,
-    Gmail,
 }
 
 impl Source {
@@ -15,7 +14,6 @@ impl Source {
         match self {
             Source::Github => "github",
             Source::Linear => "linear",
-            Source::Gmail => "gmail",
         }
     }
 
@@ -23,7 +21,6 @@ impl Source {
         match self {
             Source::Github => "webhooks.github",
             Source::Linear => "webhooks.linear",
-            Source::Gmail => "webhooks.gmail",
         }
     }
 }
@@ -35,7 +32,6 @@ impl FromStr for Source {
         match value.trim().to_ascii_lowercase().as_str() {
             "github" => Ok(Source::Github),
             "linear" => Ok(Source::Linear),
-            "gmail" => Ok(Source::Gmail),
             _ => Err("unsupported source"),
         }
     }
