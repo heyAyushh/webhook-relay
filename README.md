@@ -1,137 +1,171 @@
 # webhook-relay
 
-Rust webhook relay for GitHub and Linear events targeting OpenClaw, with signature verification, queue-backed delivery, deduplication, cooldown controls, sanitization, retries, metrics, and DLQ replay.
+Hardened webhook pipeline for OpenClaw:
 
-## Current Status
+1. `webhook-relay` (public VM) validates inbound webhooks and publishes normalized envelopes to Kafka/AutoMQ.
+2. `automq-consumer` (outbound only) consumes envelopes and POSTs to local OpenClaw `/hooks/agent`.
+3. `coder:orchestrator` receives all events in one session and coordinates worker subagents.
 
-The Rust rewrite is active and runs as a standalone service.
-Legacy shell/Python relay files are kept in this repository for parity references and migration support.
+## Workspace Layout
 
-## What It Does
+- `src/`: `webhook-relay` binary (Axum + Kafka producer)
+- `apps/automq-consumer/`: consumer binary (Kafka consumer + OpenClaw forwarder + DLQ)
+- `crates/relay-core/`: shared source/signature/model logic
+- `scripts/gen-certs.sh`: mTLS cert generation (CA, relay cert, consumer cert)
+- `deploy/nginx/webhook-relay.conf`: TLS termination + proxy
+- `systemd/`: service units for relay and consumer
+- `memory/coder-tasks.md`: shared orchestrator task board
 
-- Accepts GitHub and Linear webhook events on HTTP endpoints
-- Verifies webhook signatures before parsing payloads
-- Applies event/type/action filtering
-- Enforces dedup and per-entity cooldown semantics
-- Queues accepted events durably in `redb`
-- Sanitizes untrusted payload content before forwarding to OpenClaw
-- Retries transient forwarding failures with exponential backoff
-- Moves exhausted failures to DLQ and supports replay
-- Exposes Prometheus metrics and health/readiness endpoints
+## Legacy Scripts
 
-## Endpoints
+Legacy shell/Python scripts are still kept in `scripts/` for migration fallback and parity reference.
+They are not required for the new Rust runtime path (`webhook-relay` + `automq-consumer`).
 
-- `POST /hooks/github-pr`
-- `POST /hooks/linear`
+## Relay API
+
+- `POST /webhook/{source}`
+  - `source`: `github`, `linear`, `gmail`
+  - validates source signature/token
+  - normalizes payload into envelope and queues async Kafka publish
+  - returns `200 OK` quickly on accepted enqueue
 - `GET /health`
 - `GET /ready`
-- `GET /metrics`
-- `GET /admin/queue` (requires admin token)
-- `GET /admin/dlq` (requires admin token)
-- `POST /admin/dlq/replay/{event_id}` (requires admin token)
 
-## Required Environment Variables
+Unknown source path returns `404`.
 
-```bash
-export OPENCLAW_GATEWAY_URL="https://<your-openclaw-gateway>"
-export OPENCLAW_HOOKS_TOKEN="..."
-export GITHUB_WEBHOOK_SECRET="..."
-export LINEAR_WEBHOOK_SECRET="..."
+## Envelope Schema
+
+```json
+{
+  "id": "uuid-v4",
+  "source": "github",
+  "event_type": "pull_request.opened",
+  "received_at": "2026-02-20T14:00:00Z",
+  "payload": {}
+}
 ```
 
-## Optional Environment Variables
+## Security Controls
 
-Parity-compatible controls:
+- Per-IP rate limit: `100 req/min` (`tower-governor`)
+- Per-source rate limit: `500 req/min`
+- Body size limit: `1 MB`
+- HMAC/token verification before JSON parse acceptance
+- No payload body logging on auth failures
+- mTLS between relay/consumer and AutoMQ
 
-- `WEBHOOK_DEDUP_RETENTION_DAYS` (default: `7`)
-- `GITHUB_COOLDOWN_SECONDS` (default: `30`)
-- `LINEAR_COOLDOWN_SECONDS` (default: `30`)
-- `LINEAR_TIMESTAMP_WINDOW_SECONDS` (default: `60`)
-- `LINEAR_ENFORCE_TIMESTAMP_CHECK` (default: `true`)
-- `WEBHOOK_CURL_CONNECT_TIMEOUT_SECONDS` (default: `5`)
-- `WEBHOOK_CURL_MAX_TIME_SECONDS` (default: `20`)
-- `WEBHOOK_FORWARD_MAX_ATTEMPTS` (default: `5`)
-- `WEBHOOK_FORWARD_INITIAL_BACKOFF_SECONDS` (default: `1`)
-- `WEBHOOK_FORWARD_MAX_BACKOFF_SECONDS` (default: `30`)
-- `LINEAR_AGENT_USER_ID` (default: unset)
+## Environment Variables
 
-Rust runtime controls:
+### `webhook-relay`
 
-- `WEBHOOK_BIND_ADDR` (default: `0.0.0.0:9000`)
-- `WEBHOOK_DB_PATH` (default: `/tmp/webhook-relay/relay.redb`)
-- `WEBHOOK_MAX_BODY_BYTES` (default: `524288`)
-- `WEBHOOK_QUEUE_POLL_INTERVAL_MS` (default: `500`)
-- `WEBHOOK_ADMIN_TOKEN` (default: unset; admin APIs disabled)
-- `RUST_LOG` (default: `info`)
+Required:
 
-## Run Locally (Rust)
+- `KAFKA_BROKERS`
+- `KAFKA_TLS_CERT`
+- `KAFKA_TLS_KEY`
+- `KAFKA_TLS_CA`
+- `HMAC_SECRET_GITHUB`
+- `HMAC_SECRET_LINEAR`
+- `HMAC_SECRET_GMAIL`
+
+Optional:
+
+- `RELAY_BIND` (default: `0.0.0.0:8080`)
+- `RELAY_MAX_PAYLOAD_BYTES` (default: `1048576`)
+- `RELAY_IP_RATE_PER_MINUTE` (default: `100`)
+- `RELAY_SOURCE_RATE_PER_MINUTE` (default: `500`)
+- `RELAY_PUBLISH_QUEUE_CAPACITY` (default: `4096`)
+- `RELAY_PUBLISH_MAX_RETRIES` (default: `5`)
+- `RELAY_PUBLISH_BACKOFF_BASE_MS` (default: `200`)
+- `RELAY_PUBLISH_BACKOFF_MAX_MS` (default: `5000`)
+
+### `automq-consumer`
+
+Required:
+
+- `KAFKA_BROKERS`
+- `KAFKA_TLS_CERT`
+- `KAFKA_TLS_KEY`
+- `KAFKA_TLS_CA`
+- `KAFKA_TOPICS`
+- `OPENCLAW_WEBHOOK_URL`
+- `OPENCLAW_WEBHOOK_TOKEN`
+
+Optional:
+
+- `KAFKA_GROUP_ID` (default: `openclaw-consumer`)
+- `KAFKA_DLQ_TOPIC` (default: `webhooks.dlq`)
+- `CONSUMER_MAX_RETRIES` (default: `5`)
+- `CONSUMER_BACKOFF_BASE_SECONDS` (default: `1`)
+- `CONSUMER_BACKOFF_MAX_SECONDS` (default: `30`)
+
+## Local Build/Test
+
+Prerequisites:
+
+- Rust stable
+- OpenSSL
+- CMake (required by `rdkafka-sys`)
+
+Run:
 
 ```bash
-cargo run
+cargo test --workspace
+cargo build --workspace --release
 ```
 
-## Test (TDD + parity modules)
+## Certificates (mTLS)
+
+Generate CA and client certs:
 
 ```bash
-cargo test
+scripts/gen-certs.sh
 ```
 
-Rust parity smoke test:
+Outputs:
 
-```bash
-GITHUB_WEBHOOK_SECRET=... \
-LINEAR_WEBHOOK_SECRET=... \
-OPENCLAW_HOOKS_TOKEN=... \
-scripts/smoke-test-rust.sh
-```
+- `certs/ca.crt`, `certs/ca.key`
+- `certs/relay.crt`, `certs/relay.key`
+- `certs/consumer.crt`, `certs/consumer.key`
 
-## Docker
+## Docker Compose (VM stack)
 
-Build image:
+`docker-compose.yml` includes:
 
-```bash
-docker build -t webhook-relay:dev .
-```
+- `nginx` (TLS termination on `443`)
+- `webhook-relay`
+- `automq-consumer`
 
-Run compose stack (relay + mock OpenClaw):
+Run:
 
 ```bash
 docker compose up --build
 ```
 
-Relay listens on `http://127.0.0.1:9000`.
+## Systemd Units
 
-## Repository Layout
+- `systemd/webhook-relay.service`
+- `systemd/automq-consumer.service`
 
-- `src/`: Rust relay implementation
-- `Dockerfile`: production-focused container image
-- `docker-compose.yml`: local integration stack
-- `firecracker/`: Firecracker runtime templates and service unit
-- `proposal.md`: rewrite proposal and parity contract
-- `references/`: operational and integration runbooks
-- `SKILL.md`: repository skill metadata
-- `scripts/`: legacy relay + sanitizer + smoke test assets retained for migration
+Install to `/etc/systemd/system/`, then:
 
-## Legacy Assets (Preserved)
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now webhook-relay
+sudo systemctl enable --now automq-consumer
+```
 
-The following remain available for migration/parity work:
+## OpenClaw Orchestrator
 
-- `hooks.yaml`
-- `scripts/relay-github.sh`
-- `scripts/relay-linear.sh`
-- `scripts/sanitize-payload.py`
-- `scripts/smoke-test.sh`
+Use fixed session key: `coder:orchestrator`.
 
-## Firecracker Helpers
+Consumer forwards a single payload shape to `/hooks/agent` with:
 
-- Build rootfs/data images: `scripts/build-firecracker-rootfs.sh`
-- Run Firecracker with config: `scripts/run-firecracker.sh`
-- Runtime templates: `firecracker/firecracker-config.template.json`
+- `agentId = coder`
+- `sessionKey = coder:orchestrator`
+- `channel = telegram`
+- `to = -1003734912836:topic:2`
 
-## Security Model
+Shared board file for cross-session awareness:
 
-1. Verify authenticity (HMAC signatures)
-2. Filter unsupported events early
-3. Dedup and cooldown to reduce replay/storm impact
-4. Sanitize user text before LLM-facing downstream calls
-5. Queue and retry transient failures; isolate hard failures in DLQ
+- `memory/coder-tasks.md`

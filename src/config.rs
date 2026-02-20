@@ -1,77 +1,44 @@
 use anyhow::{Context, Result, anyhow};
 use std::env;
-use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub struct Config {
     pub bind_addr: String,
-    pub db_path: PathBuf,
-
-    pub openclaw_gateway_url: String,
-    pub openclaw_hooks_token: String,
-
-    pub github_webhook_secret: String,
-    pub linear_webhook_secret: String,
-    pub linear_agent_user_id: Option<String>,
-
-    pub dedup_retention_days: i64,
-    pub github_cooldown_seconds: i64,
-    pub linear_cooldown_seconds: i64,
-    pub linear_timestamp_window_seconds: i64,
-    pub linear_enforce_timestamp_check: bool,
-
-    pub http_connect_timeout_seconds: u64,
-    pub http_request_timeout_seconds: u64,
-    pub forward_max_attempts: u32,
-    pub forward_initial_backoff_seconds: u64,
-    pub forward_max_backoff_seconds: u64,
-
-    pub ingress_max_body_bytes: usize,
-    pub queue_poll_interval_ms: u64,
-
-    pub admin_token: Option<String>,
+    pub kafka_brokers: String,
+    pub kafka_tls_cert: String,
+    pub kafka_tls_key: String,
+    pub kafka_tls_ca: String,
+    pub hmac_secret_github: String,
+    pub hmac_secret_linear: String,
+    pub hmac_secret_gmail: String,
+    pub max_payload_bytes: usize,
+    pub ip_limit_per_minute: u32,
+    pub source_limit_per_minute: u32,
+    pub publish_queue_capacity: usize,
+    pub publish_max_retries: u32,
+    pub publish_backoff_base_ms: u64,
+    pub publish_backoff_max_ms: u64,
 }
 
 impl Config {
     pub fn from_env() -> Result<Self> {
-        let openclaw_gateway_url = required_env("OPENCLAW_GATEWAY_URL")?;
-        let openclaw_hooks_token = required_env("OPENCLAW_HOOKS_TOKEN")?;
-        let github_webhook_secret = required_env("GITHUB_WEBHOOK_SECRET")?;
-        let linear_webhook_secret = required_env("LINEAR_WEBHOOK_SECRET")?;
-
-        let bind_addr =
-            env::var("WEBHOOK_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:9000".to_string());
-        let db_path = PathBuf::from(
-            env::var("WEBHOOK_DB_PATH")
-                .unwrap_or_else(|_| "/tmp/webhook-relay/relay.redb".to_string()),
-        );
-
         Ok(Self {
-            bind_addr,
-            db_path,
-            openclaw_gateway_url,
-            openclaw_hooks_token,
-            github_webhook_secret,
-            linear_webhook_secret,
-            linear_agent_user_id: optional_non_empty("LINEAR_AGENT_USER_ID"),
-            dedup_retention_days: env_i64("WEBHOOK_DEDUP_RETENTION_DAYS", 7)?,
-            github_cooldown_seconds: env_i64("GITHUB_COOLDOWN_SECONDS", 30)?,
-            linear_cooldown_seconds: env_i64("LINEAR_COOLDOWN_SECONDS", 30)?,
-            linear_timestamp_window_seconds: env_i64("LINEAR_TIMESTAMP_WINDOW_SECONDS", 60)?,
-            linear_enforce_timestamp_check: env_bool("LINEAR_ENFORCE_TIMESTAMP_CHECK", true),
-            http_connect_timeout_seconds: env_u64("WEBHOOK_CURL_CONNECT_TIMEOUT_SECONDS", 5)?,
-            http_request_timeout_seconds: env_u64("WEBHOOK_CURL_MAX_TIME_SECONDS", 20)?,
-            forward_max_attempts: env_u32("WEBHOOK_FORWARD_MAX_ATTEMPTS", 5)?,
-            forward_initial_backoff_seconds: env_u64("WEBHOOK_FORWARD_INITIAL_BACKOFF_SECONDS", 1)?,
-            forward_max_backoff_seconds: env_u64("WEBHOOK_FORWARD_MAX_BACKOFF_SECONDS", 30)?,
-            ingress_max_body_bytes: env_usize("WEBHOOK_MAX_BODY_BYTES", 512 * 1024)?,
-            queue_poll_interval_ms: env_u64("WEBHOOK_QUEUE_POLL_INTERVAL_MS", 500)?,
-            admin_token: optional_non_empty("WEBHOOK_ADMIN_TOKEN"),
+            bind_addr: env::var("RELAY_BIND").unwrap_or_else(|_| "0.0.0.0:8080".to_string()),
+            kafka_brokers: required_env("KAFKA_BROKERS")?,
+            kafka_tls_cert: required_env("KAFKA_TLS_CERT")?,
+            kafka_tls_key: required_env("KAFKA_TLS_KEY")?,
+            kafka_tls_ca: required_env("KAFKA_TLS_CA")?,
+            hmac_secret_github: required_env("HMAC_SECRET_GITHUB")?,
+            hmac_secret_linear: required_env("HMAC_SECRET_LINEAR")?,
+            hmac_secret_gmail: required_env("HMAC_SECRET_GMAIL")?,
+            max_payload_bytes: env_usize("RELAY_MAX_PAYLOAD_BYTES", 1_048_576)?,
+            ip_limit_per_minute: env_u32("RELAY_IP_RATE_PER_MINUTE", 100)?,
+            source_limit_per_minute: env_u32("RELAY_SOURCE_RATE_PER_MINUTE", 500)?,
+            publish_queue_capacity: env_usize("RELAY_PUBLISH_QUEUE_CAPACITY", 4096)?,
+            publish_max_retries: env_u32("RELAY_PUBLISH_MAX_RETRIES", 5)?,
+            publish_backoff_base_ms: env_u64("RELAY_PUBLISH_BACKOFF_BASE_MS", 200)?,
+            publish_backoff_max_ms: env_u64("RELAY_PUBLISH_BACKOFF_MAX_MS", 5_000)?,
         })
-    }
-
-    pub fn dedup_retention_seconds(&self) -> i64 {
-        self.dedup_retention_days.saturating_mul(24 * 60 * 60)
     }
 }
 
@@ -81,27 +48,6 @@ fn required_env(name: &str) -> Result<String> {
         return Err(anyhow!("required env var {name} cannot be empty"));
     }
     Ok(value)
-}
-
-fn optional_non_empty(name: &str) -> Option<String> {
-    env::var(name).ok().and_then(|value| {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    })
-}
-
-fn env_bool(name: &str, default: bool) -> bool {
-    match env::var(name) {
-        Ok(value) => matches!(
-            value.as_str(),
-            "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
-        ),
-        Err(_) => default,
-    }
 }
 
 fn env_u32(name: &str, default: u32) -> Result<u32> {
@@ -125,19 +71,6 @@ fn env_u64(name: &str, default: u64) -> Result<u64> {
             value
                 .parse::<u64>()
                 .with_context(|| format!("invalid u64 for {name}"))
-        })
-        .transpose()
-        .map(|value| value.unwrap_or(default))
-}
-
-fn env_i64(name: &str, default: i64) -> Result<i64> {
-    env::var(name)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .map(|value| {
-            value
-                .parse::<i64>()
-                .with_context(|| format!("invalid i64 for {name}"))
         })
         .transpose()
         .map(|value| value.unwrap_or(default))
