@@ -1,1 +1,8 @@
 /target
+scripts/__pycache__/
+certs/*.crt
+certs/*.key
+certs/*.csr
+certs/*.srl
+apps/**/.git-metadata-backup/
+crates/**/.git-metadata-backup/

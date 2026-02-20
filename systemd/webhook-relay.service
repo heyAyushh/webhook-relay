@@ -1,0 +1,22 @@
+[Unit]
+Description=Webhook Relay (Rust)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=relay
+Group=relay
+EnvironmentFile=/etc/webhook-relay/relay.env
+ExecStart=/usr/local/bin/webhook-relay
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/
+ReadWritePaths=/run
+
+[Install]
+WantedBy=multi-user.target

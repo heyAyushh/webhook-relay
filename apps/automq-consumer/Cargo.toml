@@ -1,28 +1,20 @@
 [package]
-name = "webhook-relay"
+name = "automq-consumer"
 version = "0.1.0"
 edition = "2024"
 
-[workspace]
-members = [
-    "crates/relay-core",
-    "apps/automq-consumer",
-]
-resolver = "2"
-
 [dependencies]
 anyhow = "1.0.98"
-axum = { version = "0.8.4", features = ["macros"] }
 chrono = { version = "0.4.42", default-features = false, features = ["clock"] }
 rdkafka = { version = "0.38.0", features = ["cmake-build", "ssl-vendored"] }
-relay-core = { path = "crates/relay-core" }
+reqwest = { version = "0.12.22", default-features = false, features = ["json", "rustls-tls"] }
+relay-core = { path = "../../crates/relay-core" }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 tokio = { version = "1.47.1", features = ["full"] }
-tower_governor = "0.8.0"
+tokio-stream = "0.1.17"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }
-uuid = { version = "1.18.1", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3.21.0"

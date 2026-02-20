@@ -1,32 +1,60 @@
 services:
-  openclaw-mock:
-    image: mendhak/http-https-echo:35
-    container_name: openclaw-mock
-    environment:
-      HTTP_PORT: "8080"
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: relay-nginx
+    depends_on:
+      - webhook-relay
     ports:
-      - "8080:8080"
+      - "443:443"
+    volumes:
+      - ./deploy/nginx/webhook-relay.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./certs/tls.crt:/etc/nginx/certs/tls.crt:ro
+      - ./certs/tls.key:/etc/nginx/certs/tls.key:ro
+    restart: unless-stopped
 
-  relay:
+  webhook-relay:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: webhook-relay
-    depends_on:
-      - openclaw-mock
-    ports:
-      - "9000:9000"
     environment:
-      WEBHOOK_BIND_ADDR: "0.0.0.0:9000"
-      WEBHOOK_DB_PATH: "/var/lib/webhook-relay/relay.redb"
-      OPENCLAW_GATEWAY_URL: "http://openclaw-mock:8080"
-      OPENCLAW_HOOKS_TOKEN: "dev-token"
-      GITHUB_WEBHOOK_SECRET: "dev-github-secret"
-      LINEAR_WEBHOOK_SECRET: "dev-linear-secret"
+      RELAY_BIND: "0.0.0.0:8080"
+      RELAY_MAX_PAYLOAD_BYTES: "1048576"
+      RELAY_IP_RATE_PER_MINUTE: "100"
+      RELAY_SOURCE_RATE_PER_MINUTE: "500"
+      KAFKA_BROKERS: "${KAFKA_BROKERS}"
+      KAFKA_TLS_CERT: "/etc/relay/certs/relay.crt"
+      KAFKA_TLS_KEY: "/etc/relay/certs/relay.key"
+      KAFKA_TLS_CA: "/etc/relay/certs/ca.crt"
+      HMAC_SECRET_GITHUB: "${HMAC_SECRET_GITHUB}"
+      HMAC_SECRET_LINEAR: "${HMAC_SECRET_LINEAR}"
+      HMAC_SECRET_GMAIL: "${HMAC_SECRET_GMAIL}"
       RUST_LOG: "info"
+    expose:
+      - "8080"
     volumes:
-      - relay-data:/var/lib/webhook-relay
+      - ./certs:/etc/relay/certs:ro
     restart: unless-stopped
 
-volumes:
-  relay-data:
+  automq-consumer:
+    build:
+      context: .
+      dockerfile: apps/automq-consumer/Dockerfile
+    container_name: automq-consumer
+    environment:
+      KAFKA_BROKERS: "${KAFKA_BROKERS}"
+      KAFKA_TLS_CERT: "/etc/consumer/certs/consumer.crt"
+      KAFKA_TLS_KEY: "/etc/consumer/certs/consumer.key"
+      KAFKA_TLS_CA: "/etc/consumer/certs/ca.crt"
+      KAFKA_GROUP_ID: "openclaw-consumer"
+      KAFKA_TOPICS: "webhooks.github,webhooks.linear,webhooks.gmail"
+      KAFKA_DLQ_TOPIC: "webhooks.dlq"
+      OPENCLAW_WEBHOOK_URL: "${OPENCLAW_WEBHOOK_URL:-http://host.docker.internal:18789/hooks/agent}"
+      OPENCLAW_WEBHOOK_TOKEN: "${OPENCLAW_WEBHOOK_TOKEN}"
+      CONSUMER_MAX_RETRIES: "5"
+      CONSUMER_BACKOFF_BASE_SECONDS: "1"
+      CONSUMER_BACKOFF_MAX_SECONDS: "30"
+      RUST_LOG: "info"
+    volumes:
+      - ./certs:/etc/consumer/certs:ro
+    restart: unless-stopped

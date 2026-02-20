@@ -1,759 +1,241 @@
 use anyhow::{Context, Result};
-use axum::extract::{DefaultBodyLimit, Path, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::body::Bytes;
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, State};
+use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use reqwest::Client;
+use relay_core::model::Source;
 use serde_json::{Value, json};
+use std::net::SocketAddr;
+use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::net::TcpListener;
-use tokio::sync::{Notify, watch};
-use tokio::time::Duration;
-use tracing::{error, info, warn};
+use tokio::sync::mpsc;
+use tower_governor::GovernorLayer;
+use tower_governor::governor::GovernorConfigBuilder;
+use tower_governor::key_extractor::SmartIpKeyExtractor;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
-use uuid::Uuid;
 use webhook_relay::config::Config;
-use webhook_relay::filters::{is_supported_github_event_action, is_supported_linear_type};
-use webhook_relay::keys::{
-    github_cooldown_key, github_dedup_key, linear_cooldown_key, linear_dedup_key,
-};
-use webhook_relay::metrics::Metrics;
-use webhook_relay::model::{EnqueueResult, EventMetadata, PendingEvent, Source};
-use webhook_relay::sanitize::sanitize_payload;
-use webhook_relay::signatures::{verify_github_signature, verify_linear_signature};
-use webhook_relay::store::RelayStore;
-use webhook_relay::timestamps::verify_linear_timestamp_window;
+use webhook_relay::envelope::build_envelope;
+use webhook_relay::middleware::SourceRateLimiter;
+use webhook_relay::producer::{KafkaPublisher, PublishJob, run_publish_worker};
+use webhook_relay::sources::{ValidationError, github, gmail, linear};
 
 #[derive(Clone)]
 struct AppState {
     config: Config,
-    store: RelayStore,
-    metrics: Metrics,
-    http_client: Client,
-    worker_notify: Arc<Notify>,
-}
-
-#[derive(Debug)]
-enum ForwardAttemptOutcome {
-    Success,
-    Transient(String),
-    Permanent(String),
+    publish_tx: mpsc::Sender<PublishJob>,
+    source_rate_limiter: SourceRateLimiter,
+    publish_worker_alive: Arc<AtomicBool>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     setup_tracing();
 
-    let config = Config::from_env().context("load config from environment")?;
-    let store = RelayStore::open(&config.db_path).context("open relay store")?;
-    let metrics = Metrics::new().context("initialize metrics")?;
+    let config = Config::from_env().context("load relay config")?;
+    let publisher = KafkaPublisher::from_config(&config).context("initialize kafka producer")?;
 
-    let http_client = Client::builder()
-        .connect_timeout(Duration::from_secs(config.http_connect_timeout_seconds))
-        .timeout(Duration::from_secs(config.http_request_timeout_seconds))
-        .build()
-        .context("build HTTP client")?;
-
-    let state = Arc::new(AppState {
-        config,
-        store,
-        metrics,
-        http_client,
-        worker_notify: Arc::new(Notify::new()),
+    let (publish_tx, publish_rx) = mpsc::channel(config.publish_queue_capacity);
+    let publish_worker_alive = Arc::new(AtomicBool::new(true));
+    let publish_worker_alive_for_task = publish_worker_alive.clone();
+    let publish_worker_handle = tokio::spawn(async move {
+        run_publish_worker(publish_rx, publisher).await;
+        publish_worker_alive_for_task.store(false, Ordering::SeqCst);
     });
 
-    refresh_queue_metrics(&state);
+    let state = Arc::new(AppState {
+        source_rate_limiter: SourceRateLimiter::new(config.source_limit_per_minute),
+        config,
+        publish_tx,
+        publish_worker_alive,
+    });
+
+    let period_ms = ip_refill_period_ms(state.config.ip_limit_per_minute);
+    let mut governor_builder = GovernorConfigBuilder::default()
+        .key_extractor(SmartIpKeyExtractor)
+        .use_headers();
+    governor_builder
+        .per_millisecond(period_ms)
+        .burst_size(state.config.ip_limit_per_minute)
+        .methods(vec![Method::POST]);
+    let governor_config = Arc::new(
+        governor_builder
+            .finish()
+            .ok_or_else(|| anyhow::anyhow!("build governor config"))?,
+    );
 
     let app = Router::new()
-        .route("/hooks/github-pr", post(github_hook))
-        .route("/hooks/linear", post(linear_hook))
+        .route("/webhook/{source}", post(webhook_handler))
         .route("/health", get(health))
         .route("/ready", get(ready))
-        .route("/metrics", get(metrics_endpoint))
-        .route("/admin/queue", get(admin_queue))
-        .route("/admin/dlq", get(admin_dlq))
-        .route("/admin/dlq/replay/{event_id}", post(admin_replay))
-        .layer(DefaultBodyLimit::max(state.config.ingress_max_body_bytes))
+        .layer(DefaultBodyLimit::max(state.config.max_payload_bytes))
+        .layer(GovernorLayer::new(governor_config))
         .with_state(state.clone());
 
     let listener = TcpListener::bind(&state.config.bind_addr)
         .await
         .with_context(|| format!("bind {}", state.config.bind_addr))?;
 
-    info!(bind_addr = %state.config.bind_addr, "webhook relay listening");
+    info!(bind = %state.config.bind_addr, "webhook relay listening");
 
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let worker_state = state.clone();
-    let worker_handle = tokio::spawn(async move {
-        worker_loop(worker_state, shutdown_rx).await;
+    let server = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async {
+        let _ = tokio::signal::ctrl_c().await;
     });
 
-    let shutdown_for_server = shutdown_tx.clone();
-    let server = axum::serve(listener, app).with_graceful_shutdown(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            info!("shutdown signal received");
-        }
-        let _ = shutdown_for_server.send(true);
-    });
+    server.await.context("serve webhook relay")?;
 
-    server.await.context("serve axum application")?;
-    let _ = shutdown_tx.send(true);
-    state.worker_notify.notify_waiters();
-
-    worker_handle.await.context("join worker task")?;
+    drop(state);
+    publish_worker_handle.abort();
+    let _ = publish_worker_handle.await;
 
     Ok(())
 }
 
-async fn worker_loop(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<bool>) {
-    let poll_interval = Duration::from_millis(state.config.queue_poll_interval_ms);
-
-    loop {
-        tokio::select! {
-            _ = shutdown_rx.changed() => {
-                if *shutdown_rx.borrow() {
-                    break;
-                }
-            }
-            _ = state.worker_notify.notified() => {}
-            _ = tokio::time::sleep(poll_interval) => {}
-        }
-
-        loop {
-            if *shutdown_rx.borrow() {
-                break;
-            }
-
-            let now = epoch_seconds();
-            let maybe_event = match state.store.pop_due_event(now) {
-                Ok(event) => event,
-                Err(error) => {
-                    error!(error = %error, "failed to pop due event");
-                    break;
-                }
-            };
-
-            let Some(event) = maybe_event else {
-                break;
-            };
-
-            process_pending_event(state.clone(), event).await;
-            refresh_queue_metrics(&state);
-        }
-    }
-
-    info!("worker loop stopped");
-}
-
-async fn process_pending_event(state: Arc<AppState>, mut event: PendingEvent) {
-    let source_label = event.source.as_str();
-    let sanitized_payload = match sanitize_payload(source_label, &event.payload) {
-        Ok(payload) => payload,
-        Err(error) => {
-            error!(event_id = %event.event_id, error = %error, "sanitize failed");
-            if let Err(dlq_error) =
-                state
-                    .store
-                    .move_to_dlq(event, "sanitization_failed", epoch_seconds())
-            {
-                error!(error = %dlq_error, "failed to store sanitization failure in dlq");
-            }
-            state
-                .metrics
-                .inc_dropped(source_label, "sanitization_failed");
-            return;
-        }
+async fn webhook_handler(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    Path(source_path): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    let source = match Source::from_str(&source_path) {
+        Ok(source) => source,
+        Err(_) => return (StatusCode::NOT_FOUND, Json(json!({"error":"not found"}))),
     };
 
-    match forward_once(&state, &event, &sanitized_payload).await {
-        ForwardAttemptOutcome::Success => {
-            state.metrics.inc_forwarded(source_label);
-        }
-        ForwardAttemptOutcome::Permanent(reason) => {
-            warn!(event_id = %event.event_id, reason = %reason, "permanent forwarding failure");
-            if let Err(error) = state
-                .store
-                .move_to_dlq(event, "forward_failed", epoch_seconds())
-            {
-                error!(error = %error, "failed to move permanent failure to dlq");
-            }
-            state.metrics.inc_dropped(source_label, "forward_failed");
-        }
-        ForwardAttemptOutcome::Transient(reason) => {
-            event.attempts = event.attempts.saturating_add(1);
-            if event.attempts >= state.config.forward_max_attempts {
+    if !state
+        .source_rate_limiter
+        .allow(source.as_str(), epoch_seconds())
+    {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({"error":"source rate limit exceeded"})),
+        );
+    }
+
+    if let Err(error) = validate_source(&state.config, source, &headers, &body) {
+        match error {
+            ValidationError::Unauthorized(message) => {
                 warn!(
-                    event_id = %event.event_id,
-                    attempts = event.attempts,
-                    reason = %reason,
-                    "transient forwarding exhausted retries"
+                    source = source.as_str(),
+                    remote = %remote_addr.ip(),
+                    reason = message,
+                    "webhook authentication failed"
                 );
-                if let Err(error) =
-                    state
-                        .store
-                        .move_to_dlq(event, "forward_failed", epoch_seconds())
-                {
-                    error!(error = %error, "failed to move exhausted transient failure to dlq");
-                }
-                state.metrics.inc_dropped(source_label, "forward_failed");
-                return;
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({"error":"unauthorized"})),
+                );
             }
-
-            let backoff_seconds = compute_backoff_seconds(
-                state.config.forward_initial_backoff_seconds,
-                state.config.forward_max_backoff_seconds,
-                event.attempts,
-            );
-            event.next_retry_at_epoch = epoch_seconds() + backoff_seconds as i64;
-
-            warn!(
-                event_id = %event.event_id,
-                attempts = event.attempts,
-                backoff_seconds,
-                reason = %reason,
-                "transient forwarding failure, event requeued"
-            );
-
-            if let Err(error) = state.store.requeue_event(event) {
-                error!(error = %error, "failed to requeue event after transient error");
-            } else {
-                state.worker_notify.notify_one();
+            ValidationError::BadRequest(message) => {
+                return (StatusCode::BAD_REQUEST, Json(json!({"error": message})));
             }
         }
-    }
-}
-
-async fn forward_once(
-    state: &AppState,
-    event: &PendingEvent,
-    sanitized_payload: &Value,
-) -> ForwardAttemptOutcome {
-    let mut target = state
-        .config
-        .openclaw_gateway_url
-        .trim_end_matches('/')
-        .to_string();
-    target.push_str("/hooks/agent?source=");
-    target.push_str(event.source.openclaw_source_query());
-
-    let mut request = state
-        .http_client
-        .post(target)
-        .header(
-            "Authorization",
-            format!("Bearer {}", state.config.openclaw_hooks_token),
-        )
-        .header("Content-Type", "application/json")
-        .header("X-Webhook-Source", event.source.as_str())
-        .header("X-OpenClaw-Event-ID", event.event_id.clone())
-        .header("X-OpenClaw-Sanitized", "true")
-        .header(
-            "X-OpenClaw-Risk-Score",
-            compute_risk_score(sanitized_payload).to_string(),
-        )
-        .json(sanitized_payload);
-
-    match event.source {
-        Source::Github => {
-            if let Some(event_name) = &event.metadata.event_name {
-                request = request.header("X-GitHub-Event", event_name);
-            }
-            request = request.header("X-GitHub-Delivery", &event.metadata.delivery_id);
-            if let Some(installation_id) = &event.metadata.installation_id {
-                request = request.header("X-GitHub-Installation", installation_id);
-            }
-        }
-        Source::Linear => {
-            if let Some(event_name) = &event.metadata.event_name {
-                request = request.header("X-Linear-Event", event_name);
-            }
-            request = request.header("X-Linear-Delivery", &event.metadata.delivery_id);
-        }
-    }
-
-    let response = match request.send().await {
-        Ok(response) => response,
-        Err(error) => {
-            if error.is_connect() || error.is_timeout() || error.is_request() {
-                return ForwardAttemptOutcome::Transient(error.to_string());
-            }
-            return ForwardAttemptOutcome::Permanent(error.to_string());
-        }
-    };
-
-    let status = response.status();
-    if status.is_success() {
-        return ForwardAttemptOutcome::Success;
-    }
-
-    if status.is_server_error() || status.as_u16() == 429 {
-        return ForwardAttemptOutcome::Transient(format!("upstream status {status}"));
-    }
-
-    ForwardAttemptOutcome::Permanent(format!("upstream status {status}"))
-}
-
-async fn github_hook(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    body: axum::body::Bytes,
-) -> impl IntoResponse {
-    state.metrics.inc_received("github");
-
-    let signature = match header_string(&headers, "X-Hub-Signature-256") {
-        Some(value) => value,
-        None => {
-            state.metrics.inc_dropped("github", "invalid_signature");
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error":"missing signature"})),
-            );
-        }
-    };
-
-    if !verify_github_signature(&state.config.github_webhook_secret, &body, &signature) {
-        state.metrics.inc_dropped("github", "invalid_signature");
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error":"invalid signature"})),
-        );
     }
 
     let payload: Value = match serde_json::from_slice(&body) {
         Ok(payload) => payload,
-        Err(error) => {
-            state.metrics.inc_dropped("github", "invalid_payload");
+        Err(_error) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(json!({"error": format!("invalid json: {error}")})),
+                Json(json!({"error":"invalid json payload"})),
             );
         }
     };
 
-    let event_name = match header_string(&headers, "X-GitHub-Event") {
-        Some(value) => value,
-        None => {
-            state.metrics.inc_dropped("github", "invalid_payload");
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error":"missing X-GitHub-Event"})),
-            );
+    let event_type = match event_type_for_source(source, &headers, &payload) {
+        Ok(event_type) => event_type,
+        Err(ValidationError::BadRequest(message)) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": message})));
         }
-    };
-
-    let delivery_id = match header_string(&headers, "X-GitHub-Delivery") {
-        Some(value) => value,
-        None => {
-            state.metrics.inc_dropped("github", "invalid_payload");
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error":"missing X-GitHub-Delivery"})),
-            );
-        }
-    };
-
-    let action = payload
-        .get("action")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    if action.is_empty() {
-        state.metrics.inc_dropped("github", "invalid_payload");
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error":"missing action in payload"})),
-        );
-    }
-
-    if !is_supported_github_event_action(&event_name, &action) {
-        state.metrics.inc_dropped("github", "filtered");
-        return accepted("filtered");
-    }
-
-    let sender_login = payload
-        .get("sender")
-        .and_then(|sender| sender.get("login"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if sender_login.ends_with("[bot]") {
-        state.metrics.inc_dropped("github", "bot_sender");
-        return accepted("bot_sender");
-    }
-
-    let entity_id = resolve_github_entity_id(&payload);
-    let repo_name = payload
-        .get("repository")
-        .and_then(|repository| repository.get("full_name"))
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
-
-    let dedup_key = github_dedup_key(&delivery_id, &action, &entity_id);
-    let cooldown_key = github_cooldown_key(repo_name, &entity_id);
-
-    let installation_id = resolve_optional_string(&["installation", "id"], &payload);
-
-    let event = PendingEvent {
-        event_id: Uuid::new_v4().to_string(),
-        source: Source::Github,
-        dedup_key,
-        cooldown_key,
-        action,
-        entity_id,
-        payload,
-        metadata: EventMetadata {
-            delivery_id,
-            event_name: Some(event_name),
-            installation_id,
-            team_key: None,
-        },
-        attempts: 0,
-        next_retry_at_epoch: epoch_seconds(),
-        created_at_epoch: epoch_seconds(),
-    };
-
-    match state.store.enqueue_pending_event(
-        event,
-        state.config.dedup_retention_seconds(),
-        state.config.github_cooldown_seconds,
-        epoch_seconds(),
-    ) {
-        Ok(EnqueueResult::Enqueued) => {
-            state.worker_notify.notify_one();
-            refresh_queue_metrics(&state);
-            accepted("enqueued")
-        }
-        Ok(EnqueueResult::Duplicate) => {
-            state.metrics.inc_dropped("github", "duplicate_delivery");
-            accepted("duplicate_delivery")
-        }
-        Ok(EnqueueResult::Cooldown) => {
-            state.metrics.inc_dropped("github", "cooldown");
-            accepted("cooldown")
-        }
-        Err(error) => {
-            error!(error = %error, "failed to enqueue github event");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error":"failed to enqueue event"})),
-            )
-        }
-    }
-}
-
-async fn linear_hook(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    body: axum::body::Bytes,
-) -> impl IntoResponse {
-    state.metrics.inc_received("linear");
-
-    let signature = match header_string(&headers, "Linear-Signature") {
-        Some(value) => value,
-        None => {
-            state.metrics.inc_dropped("linear", "invalid_signature");
+        Err(ValidationError::Unauthorized(_)) => {
             return (
                 StatusCode::UNAUTHORIZED,
-                Json(json!({"error":"missing signature"})),
+                Json(json!({"error": "unauthorized"})),
             );
         }
     };
 
-    if !verify_linear_signature(&state.config.linear_webhook_secret, &body, &signature) {
-        state.metrics.inc_dropped("linear", "invalid_signature");
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error":"invalid signature"})),
-        );
-    }
+    let envelope = build_envelope(source, event_type, payload);
+    let topic = source.topic_name().to_string();
 
-    let payload: Value = match serde_json::from_slice(&body) {
-        Ok(payload) => payload,
-        Err(error) => {
-            state.metrics.inc_dropped("linear", "invalid_payload");
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": format!("invalid json: {error}")})),
-            );
-        }
-    };
-
-    let delivery_id = match header_string(&headers, "Linear-Delivery") {
-        Some(value) => value,
-        None => {
-            state.metrics.inc_dropped("linear", "invalid_payload");
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error":"missing Linear-Delivery"})),
-            );
-        }
-    };
-
-    let event_type = payload
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let action = payload
-        .get("action")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-
-    if event_type.is_empty() || action.is_empty() {
-        state.metrics.inc_dropped("linear", "invalid_payload");
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error":"missing type or action in payload"})),
-        );
-    }
-
-    if !is_supported_linear_type(&event_type) {
-        state.metrics.inc_dropped("linear", "filtered");
-        return accepted("filtered");
-    }
-
-    if !verify_linear_timestamp_window(
-        &payload,
-        epoch_seconds(),
-        state.config.linear_timestamp_window_seconds,
-        state.config.linear_enforce_timestamp_check,
-    ) {
-        state.metrics.inc_dropped("linear", "invalid_timestamp");
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error":"invalid or stale webhookTimestamp"})),
-        );
-    }
-
-    if let Some(agent_user_id) = &state.config.linear_agent_user_id {
-        let actor_id = payload
-            .get("data")
-            .and_then(|data| data.get("userId"))
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        if !actor_id.is_empty() && actor_id == agent_user_id {
-            state.metrics.inc_dropped("linear", "agent_user");
-            return accepted("agent_user");
-        }
-    }
-
-    let entity_id = payload
-        .get("data")
-        .and_then(|data| data.get("id"))
-        .and_then(Value::as_str)
-        .unwrap_or("unknown")
-        .to_string();
-    let team_key = payload
-        .get("data")
-        .and_then(|data| data.get("team"))
-        .and_then(|team| team.get("key"))
-        .and_then(Value::as_str)
-        .unwrap_or("unknown")
-        .to_string();
-
-    let dedup_key = linear_dedup_key(&delivery_id, &action, &entity_id);
-    let cooldown_key = linear_cooldown_key(&team_key, &entity_id);
-
-    let event = PendingEvent {
-        event_id: Uuid::new_v4().to_string(),
-        source: Source::Linear,
-        dedup_key,
-        cooldown_key,
-        action,
-        entity_id,
-        payload,
-        metadata: EventMetadata {
-            delivery_id,
-            event_name: Some(event_type),
-            installation_id: None,
-            team_key: Some(team_key),
-        },
-        attempts: 0,
-        next_retry_at_epoch: epoch_seconds(),
-        created_at_epoch: epoch_seconds(),
-    };
-
-    match state.store.enqueue_pending_event(
-        event,
-        state.config.dedup_retention_seconds(),
-        state.config.linear_cooldown_seconds,
-        epoch_seconds(),
-    ) {
-        Ok(EnqueueResult::Enqueued) => {
-            state.worker_notify.notify_one();
-            refresh_queue_metrics(&state);
-            accepted("enqueued")
-        }
-        Ok(EnqueueResult::Duplicate) => {
-            state.metrics.inc_dropped("linear", "duplicate_delivery");
-            accepted("duplicate_delivery")
-        }
-        Ok(EnqueueResult::Cooldown) => {
-            state.metrics.inc_dropped("linear", "cooldown");
-            accepted("cooldown")
-        }
-        Err(error) => {
-            error!(error = %error, "failed to enqueue linear event");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error":"failed to enqueue event"})),
-            )
-        }
+    let event_id = envelope.id.clone();
+    let publish_job = PublishJob { topic, envelope };
+    match state.publish_tx.try_send(publish_job) {
+        Ok(()) => (StatusCode::OK, Json(json!({"status":"ok","id": event_id}))),
+        Err(mpsc::error::TrySendError::Full(_)) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error":"publisher queue is full"})),
+        ),
+        Err(mpsc::error::TrySendError::Closed(_)) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error":"publisher unavailable"})),
+        ),
     }
 }
 
 async fn health() -> impl IntoResponse {
-    (StatusCode::OK, "ok\n")
+    (StatusCode::OK, Json(json!({"status": "ok"})))
 }
 
 async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let pending_count = match state.store.pending_count() {
-        Ok(count) => count,
-        Err(error) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({"status":"not_ready","error":error.to_string()})),
-            );
-        }
-    };
-
-    let dlq_count = match state.store.dlq_count() {
-        Ok(count) => count,
-        Err(error) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({"status":"not_ready","error":error.to_string()})),
-            );
-        }
-    };
-
-    refresh_queue_metrics(&state);
+    if !state.publish_worker_alive.load(Ordering::SeqCst) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"status":"not_ready","reason":"publisher worker not running"})),
+        );
+    }
 
     (
         StatusCode::OK,
         Json(json!({
             "status": "ready",
-            "queue_depth": pending_count,
-            "dlq_depth": dlq_count,
+            "bind": state.config.bind_addr,
             "version": env!("CARGO_PKG_VERSION")
         })),
     )
 }
 
-async fn metrics_endpoint(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match state.metrics.render() {
-        Ok(body) => {
-            let mut headers = HeaderMap::new();
-            headers.insert(
-                axum::http::header::CONTENT_TYPE,
-                HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
-            );
-            (StatusCode::OK, headers, body)
-        }
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            HeaderMap::new(),
-            format!("failed to render metrics: {error}"),
-        ),
-    }
-}
-
-async fn admin_queue(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
-    if let Err(response) = require_admin_auth(&state, &headers) {
-        return response;
-    }
-
-    let pending = state.store.pending_count().unwrap_or(0);
-    let dlq = state.store.dlq_count().unwrap_or(0);
-    refresh_queue_metrics(&state);
-
-    (
-        StatusCode::OK,
-        Json(json!({"pending": pending, "dlq": dlq})),
-    )
-}
-
-async fn admin_dlq(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
-    if let Err(response) = require_admin_auth(&state, &headers) {
-        return response;
-    }
-
-    match state.store.list_dlq_events(100) {
-        Ok(events) => (StatusCode::OK, Json(json!({"events": events}))),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error.to_string()})),
-        ),
-    }
-}
-
-async fn admin_replay(
-    State(state): State<Arc<AppState>>,
-    Path(event_id): Path<String>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if let Err(response) = require_admin_auth(&state, &headers) {
-        return response;
-    }
-
-    match state.store.replay_dlq_event(&event_id, epoch_seconds()) {
-        Ok(true) => {
-            state.worker_notify.notify_one();
-            refresh_queue_metrics(&state);
-            (
-                StatusCode::OK,
-                Json(json!({"replayed": true, "event_id": event_id})),
-            )
-        }
-        Ok(false) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"replayed": false, "event_id": event_id})),
-        ),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error.to_string()})),
-        ),
-    }
-}
-
-fn require_admin_auth(
-    state: &AppState,
+fn validate_source(
+    config: &Config,
+    source: Source,
     headers: &HeaderMap,
-) -> Result<(), (StatusCode, Json<Value>)> {
-    let Some(admin_token) = &state.config.admin_token else {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(json!({"error":"admin endpoints disabled"})),
-        ));
-    };
+    body: &[u8],
+) -> Result<(), ValidationError> {
+    match source {
+        Source::Github => github::validate(&config.hmac_secret_github, headers, body),
+        Source::Linear => linear::validate(&config.hmac_secret_linear, headers, body),
+        Source::Gmail => gmail::validate(&config.hmac_secret_gmail, headers),
+    }
+}
 
-    let auth_header = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default();
-    let expected = format!("Bearer {admin_token}");
+fn event_type_for_source(
+    source: Source,
+    headers: &HeaderMap,
+    payload: &Value,
+) -> Result<String, ValidationError> {
+    match source {
+        Source::Github => github::event_type(headers, payload),
+        Source::Linear => linear::event_type(payload),
+        Source::Gmail => Ok(gmail::event_type(headers, payload)),
+    }
+}
 
-    if auth_header != expected {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error":"unauthorized"})),
-        ));
+fn ip_refill_period_ms(limit_per_minute: u32) -> u64 {
+    if limit_per_minute == 0 {
+        return 1;
     }
 
-    Ok(())
-}
-
-fn refresh_queue_metrics(state: &AppState) {
-    let pending = state.store.pending_count().unwrap_or(0);
-    let dlq = state.store.dlq_count().unwrap_or(0);
-    state.metrics.set_queue_depth(pending);
-    state.metrics.set_dlq_depth(dlq);
-}
-
-fn setup_tracing() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    let period = 60_000u64 / u64::from(limit_per_minute);
+    period.max(1)
 }
 
 fn epoch_seconds() -> i64 {
@@ -763,77 +245,17 @@ fn epoch_seconds() -> i64 {
         .as_secs() as i64
 }
 
-fn compute_backoff_seconds(initial_seconds: u64, max_seconds: u64, attempts: u32) -> u64 {
-    let exponent = attempts.saturating_sub(1).min(31);
-    let scaled = initial_seconds.saturating_mul(1u64 << exponent);
-    scaled.min(max_seconds)
+fn setup_tracing() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 }
 
-fn compute_risk_score(sanitized_payload: &Value) -> u32 {
-    let flags_count: usize = sanitized_payload
-        .get("_flags")
-        .and_then(Value::as_array)
-        .map(|flags| {
-            flags
-                .iter()
-                .map(|entry| {
-                    entry
-                        .get("count")
-                        .and_then(Value::as_u64)
-                        .unwrap_or_default() as usize
-                })
-                .sum()
-        })
-        .unwrap_or_default();
+#[cfg(test)]
+mod tests {
+    use super::ip_refill_period_ms;
 
-    (flags_count.saturating_mul(10).min(100)) as u32
-}
-
-fn resolve_github_entity_id(payload: &Value) -> String {
-    payload
-        .get("pull_request")
-        .and_then(|pull_request| pull_request.get("number"))
-        .or_else(|| payload.get("issue").and_then(|issue| issue.get("number")))
-        .or_else(|| payload.get("number"))
-        .map(value_to_string)
-        .unwrap_or_else(|| "unknown".to_string())
-}
-
-fn resolve_optional_string(path: &[&str], payload: &Value) -> Option<String> {
-    let mut current = payload;
-    for segment in path {
-        current = current.get(*segment)?;
+    #[test]
+    fn ip_limit_refill_period_matches_100_per_minute() {
+        assert_eq!(ip_refill_period_ms(100), 600);
     }
-    Some(value_to_string(current))
-}
-
-fn value_to_string(value: &Value) -> String {
-    if let Some(text) = value.as_str() {
-        return text.to_string();
-    }
-    if let Some(number) = value.as_i64() {
-        return number.to_string();
-    }
-    if let Some(number) = value.as_u64() {
-        return number.to_string();
-    }
-    if let Some(number) = value.as_f64() {
-        return number.to_string();
-    }
-    value.to_string()
-}
-
-fn header_string(headers: &HeaderMap, name: &str) -> Option<String> {
-    headers
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-fn accepted(reason: &str) -> (StatusCode, Json<Value>) {
-    (
-        StatusCode::ACCEPTED,
-        Json(json!({"status":"accepted","reason":reason})),
-    )
 }
