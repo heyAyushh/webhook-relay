@@ -45,7 +45,7 @@ impl KafkaConsumer {
     }
 
     pub async fn run(&self) -> Result<()> {
-        info!("automq-consumer started");
+        info!("kafka-openclaw-hook started");
 
         loop {
             match self.consumer.recv().await {

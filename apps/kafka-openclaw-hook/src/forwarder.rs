@@ -6,18 +6,6 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::time::{Duration, sleep};
 
-const DEFAULT_TIMEOUT_SECONDS: u64 = 20;
-const MESSAGE_MAX_BYTES: usize = 4_000;
-const AGENT_ID: &str = "coder";
-const SESSION_KEY: &str = "coder:orchestrator";
-const WAKE_MODE: &str = "now";
-const WEBHOOK_NAME: &str = "WebhookRelay";
-const CHANNEL: &str = "telegram";
-const TELEGRAM_TOPIC: &str = "-1003734912836:topic:2";
-const MODEL: &str = "anthropic/claude-sonnet-4-6";
-const THINKING: &str = "low";
-const TIMEOUT_SECONDS: u64 = 600;
-
 #[derive(Clone)]
 pub struct Forwarder {
     config: Config,
@@ -27,15 +15,15 @@ pub struct Forwarder {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AgentWebhookPayload {
-    agent_id: &'static str,
-    session_key: &'static str,
-    wake_mode: &'static str,
-    name: &'static str,
+    agent_id: String,
+    session_key: String,
+    wake_mode: String,
+    name: String,
     deliver: bool,
-    channel: &'static str,
-    to: &'static str,
-    model: &'static str,
-    thinking: &'static str,
+    channel: String,
+    to: String,
+    model: String,
+    thinking: String,
     timeout_seconds: u64,
     message: String,
 }
@@ -49,7 +37,7 @@ enum ForwardErrorKind {
 impl Forwarder {
     pub fn new(config: Config) -> Result<Self> {
         let client = Client::builder()
-            .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECONDS))
+            .timeout(Duration::from_secs(config.openclaw_http_timeout_seconds))
             .build()
             .context("build reqwest client")?;
 
@@ -90,17 +78,17 @@ impl Forwarder {
         envelope: &WebhookEnvelope,
     ) -> std::result::Result<(), ForwardErrorKind> {
         let payload = AgentWebhookPayload {
-            agent_id: AGENT_ID,
-            session_key: SESSION_KEY,
-            wake_mode: WAKE_MODE,
-            name: WEBHOOK_NAME,
-            deliver: true,
-            channel: CHANNEL,
-            to: TELEGRAM_TOPIC,
-            model: MODEL,
-            thinking: THINKING,
-            timeout_seconds: TIMEOUT_SECONDS,
-            message: build_message(envelope),
+            agent_id: self.config.openclaw_agent_id.clone(),
+            session_key: self.config.openclaw_session_key.clone(),
+            wake_mode: self.config.openclaw_wake_mode.clone(),
+            name: self.config.openclaw_name.clone(),
+            deliver: self.config.openclaw_deliver,
+            channel: self.config.openclaw_channel.clone(),
+            to: self.config.openclaw_to.clone(),
+            model: self.config.openclaw_model.clone(),
+            thinking: self.config.openclaw_thinking.clone(),
+            timeout_seconds: self.config.openclaw_timeout_seconds,
+            message: build_message(envelope, self.config.openclaw_message_max_bytes),
         };
 
         let response = match self
@@ -141,8 +129,8 @@ impl Forwarder {
     }
 }
 
-fn build_message(envelope: &WebhookEnvelope) -> String {
-    let payload_summary = summarize_payload(&envelope.payload, MESSAGE_MAX_BYTES);
+fn build_message(envelope: &WebhookEnvelope, message_max_bytes: usize) -> String {
+    let payload_summary = summarize_payload(&envelope.payload, message_max_bytes);
     format!(
         "[{}] {}\nEvent ID: {}\n\n{}",
         envelope.source, envelope.event_type, envelope.id, payload_summary
@@ -197,7 +185,7 @@ mod tests {
             payload: json!({"number":42}),
         };
 
-        let message = build_message(&envelope);
+        let message = build_message(&envelope, 4_000);
         assert!(message.contains("[github] pull_request.opened"));
         assert!(message.contains("Event ID: id-1"));
         assert!(message.contains("\"number\":42"));

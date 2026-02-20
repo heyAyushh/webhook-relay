@@ -56,24 +56,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
-name = "automq-consumer"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "rdkafka",
- "relay-core",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-stream",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "axum"
 version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -824,6 +806,24 @@ checksum = "8c942ebf8e95485ca0d52d97da7c5a2c387d0e7f0ba4c35e93bfcaee045955b3"
 dependencies = [
  "once_cell",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "kafka-openclaw-hook"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "rdkafka",
+ "relay-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2204,6 +2204,7 @@ dependencies = [
  "anyhow",
  "axum",
  "chrono",
+ "ipnet",
  "rdkafka",
  "relay-core",
  "serde",
