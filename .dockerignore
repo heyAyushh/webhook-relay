@@ -1,0 +1,8 @@
+.git
+.gitignore
+target
+scripts/__pycache__
+*.pyc
+*.pyo
+*.swp
+.DS_Store

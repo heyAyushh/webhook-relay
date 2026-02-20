@@ -1,115 +1,171 @@
 # webhook-relay
 
-Relay GitHub and Linear webhooks to an OpenClaw gateway with signature checks, replay protection, cooldown throttling, and payload sanitization for LLM safety.
+Hardened webhook pipeline for OpenClaw:
 
-## What it does
+1. `webhook-relay` (public VM) validates inbound webhooks and publishes normalized envelopes to Kafka/AutoMQ.
+2. `automq-consumer` (outbound only) consumes envelopes and POSTs to local OpenClaw `/hooks/agent`.
+3. `coder:orchestrator` receives all events in one session and coordinates worker subagents.
 
-- Accepts webhook events through `adnanh/webhook` (`hooks.yaml`)
-- Routes GitHub PR/review/comment and Linear issue/comment events to relay scripts
-- Verifies signatures (`payload-hmac-sha256` for GitHub via webhook, HMAC validation for Linear in script)
-- Deduplicates repeated deliveries and applies per-entity cooldown windows
-- Sanitizes user-controlled text to reduce prompt-injection risk before forwarding
-- Forwards sanitized payloads to OpenClaw hooks endpoints
+## Workspace Layout
 
-## Repository layout
+- `src/`: `webhook-relay` binary (Axum + Kafka producer)
+- `apps/automq-consumer/`: consumer binary (Kafka consumer + OpenClaw forwarder + DLQ)
+- `crates/relay-core/`: shared source/signature/model logic
+- `scripts/gen-certs.sh`: mTLS cert generation (CA, relay cert, consumer cert)
+- `deploy/nginx/webhook-relay.conf`: TLS termination + proxy
+- `systemd/`: service units for relay and consumer
+- `memory/coder-tasks.md`: shared orchestrator task board
 
-- `hooks.yaml`: webhook endpoint and trigger definitions
-- `scripts/relay-github.sh`: GitHub relay, dedup, cooldown, forward
-- `scripts/relay-linear.sh`: Linear relay, signature verification, dedup, cooldown, forward
-- `scripts/sanitize-payload.py`: allowlist extraction, text fencing, injection pattern flagging, truncation
-- `scripts/smoke-test.sh`: end-to-end signed webhook smoke test
-- `references/`: setup and integration runbooks
+## Legacy Scripts
 
-## Prerequisites
+Legacy shell/Python scripts are still kept in `scripts/` for migration fallback and parity reference.
+They are not required for the new Rust runtime path (`webhook-relay` + `automq-consumer`).
 
-- `webhook` (https://github.com/adnanh/webhook)
-- `bash`, `curl`, `openssl`, `python3`
+## Relay API
 
-Install webhook on macOS:
+- `POST /webhook/{source}`
+  - `source`: `github`, `linear`, `gmail`
+  - validates source signature/token
+  - normalizes payload into envelope and queues async Kafka publish
+  - returns `200 OK` quickly on accepted enqueue
+- `GET /health`
+- `GET /ready`
 
-```bash
-brew install webhook
+Unknown source path returns `404`.
+
+## Envelope Schema
+
+```json
+{
+  "id": "uuid-v4",
+  "source": "github",
+  "event_type": "pull_request.opened",
+  "received_at": "2026-02-20T14:00:00Z",
+  "payload": {}
+}
 ```
 
-Alternative:
+## Security Controls
+
+- Per-IP rate limit: `100 req/min` (`tower-governor`)
+- Per-source rate limit: `500 req/min`
+- Body size limit: `1 MB`
+- HMAC/token verification before JSON parse acceptance
+- No payload body logging on auth failures
+- mTLS between relay/consumer and AutoMQ
+
+## Environment Variables
+
+### `webhook-relay`
+
+Required:
+
+- `KAFKA_BROKERS`
+- `KAFKA_TLS_CERT`
+- `KAFKA_TLS_KEY`
+- `KAFKA_TLS_CA`
+- `HMAC_SECRET_GITHUB`
+- `HMAC_SECRET_LINEAR`
+- `HMAC_SECRET_GMAIL`
+
+Optional:
+
+- `RELAY_BIND` (default: `0.0.0.0:8080`)
+- `RELAY_MAX_PAYLOAD_BYTES` (default: `1048576`)
+- `RELAY_IP_RATE_PER_MINUTE` (default: `100`)
+- `RELAY_SOURCE_RATE_PER_MINUTE` (default: `500`)
+- `RELAY_PUBLISH_QUEUE_CAPACITY` (default: `4096`)
+- `RELAY_PUBLISH_MAX_RETRIES` (default: `5`)
+- `RELAY_PUBLISH_BACKOFF_BASE_MS` (default: `200`)
+- `RELAY_PUBLISH_BACKOFF_MAX_MS` (default: `5000`)
+
+### `automq-consumer`
+
+Required:
+
+- `KAFKA_BROKERS`
+- `KAFKA_TLS_CERT`
+- `KAFKA_TLS_KEY`
+- `KAFKA_TLS_CA`
+- `KAFKA_TOPICS`
+- `OPENCLAW_WEBHOOK_URL`
+- `OPENCLAW_WEBHOOK_TOKEN`
+
+Optional:
+
+- `KAFKA_GROUP_ID` (default: `openclaw-consumer`)
+- `KAFKA_DLQ_TOPIC` (default: `webhooks.dlq`)
+- `CONSUMER_MAX_RETRIES` (default: `5`)
+- `CONSUMER_BACKOFF_BASE_SECONDS` (default: `1`)
+- `CONSUMER_BACKOFF_MAX_SECONDS` (default: `30`)
+
+## Local Build/Test
+
+Prerequisites:
+
+- Rust stable
+- OpenSSL
+- CMake (required by `rdkafka-sys`)
+
+Run:
 
 ```bash
-go install github.com/adnanh/webhook@latest
+cargo test --workspace
+cargo build --workspace --release
 ```
 
-## Required environment variables
+## Certificates (mTLS)
+
+Generate CA and client certs:
 
 ```bash
-export GITHUB_WEBHOOK_SECRET="..."
-export LINEAR_WEBHOOK_SECRET="..."
-export OPENCLAW_HOOKS_TOKEN="..."
-export OPENCLAW_GATEWAY_URL="https://<your-openclaw-gateway>"
+scripts/gen-certs.sh
 ```
 
-Optional runtime controls:
+Outputs:
 
-- `WEBHOOK_DEDUP_DIR` (default: `/tmp/webhook-dedup`)
-- `WEBHOOK_DEDUP_RETENTION_DAYS` (default: `7`)
-- `GITHUB_COOLDOWN_SECONDS` (default: `30`)
-- `LINEAR_COOLDOWN_SECONDS` (default: `30`)
-- `LINEAR_TIMESTAMP_WINDOW_SECONDS` (default: `60`)
-- `LINEAR_ENFORCE_TIMESTAMP_CHECK` (default: `true`)
-- `WEBHOOK_CURL_CONNECT_TIMEOUT_SECONDS` (default: `5`)
-- `WEBHOOK_CURL_MAX_TIME_SECONDS` (default: `20`)
+- `certs/ca.crt`, `certs/ca.key`
+- `certs/relay.crt`, `certs/relay.key`
+- `certs/consumer.crt`, `certs/consumer.key`
 
-## Run locally
+## Docker Compose (VM stack)
+
+`docker-compose.yml` includes:
+
+- `nginx` (TLS termination on `443`)
+- `webhook-relay`
+- `automq-consumer`
+
+Run:
 
 ```bash
-webhook -hooks hooks.yaml -verbose -port 9000
+docker compose up --build
 ```
 
-Endpoints:
+## Systemd Units
 
-- `POST /hooks/github-pr`
-- `POST /hooks/linear`
+- `systemd/webhook-relay.service`
+- `systemd/automq-consumer.service`
 
-## Quick sanitizer check
+Install to `/etc/systemd/system/`, then:
 
 ```bash
-echo '{"action":"opened"}' | python3 scripts/sanitize-payload.py --source github
+sudo systemctl daemon-reload
+sudo systemctl enable --now webhook-relay
+sudo systemctl enable --now automq-consumer
 ```
 
-## Smoke test
+## OpenClaw Orchestrator
 
-Runs webhook server + signed sample events. By default it starts a local mock OpenClaw service and verifies exactly one GitHub and one Linear event are forwarded after deduplication.
+Use fixed session key: `coder:orchestrator`.
 
-```bash
-GITHUB_WEBHOOK_SECRET=... \
-LINEAR_WEBHOOK_SECRET=... \
-OPENCLAW_HOOKS_TOKEN=... \
-scripts/smoke-test.sh
-```
+Consumer forwards a single payload shape to `/hooks/agent` with:
 
-Use live OpenClaw instead of local mock:
+- `agentId = coder`
+- `sessionKey = coder:orchestrator`
+- `channel = telegram`
+- `to = -1003734912836:topic:2`
 
-```bash
-GITHUB_WEBHOOK_SECRET=... \
-LINEAR_WEBHOOK_SECRET=... \
-OPENCLAW_HOOKS_TOKEN=... \
-OPENCLAW_GATEWAY_URL=https://<your-openclaw-gateway> \
-scripts/smoke-test.sh -l
-```
+Shared board file for cross-session awareness:
 
-## Basic validation before PR
-
-```bash
-bash -n scripts/*.sh
-python3 -m py_compile scripts/sanitize-payload.py
-```
-
-Then run the smoke test command above.
-
-## Security model (high level)
-
-1. Verify webhook authenticity (GitHub/Linear signatures)
-2. Extract only needed fields from payloads
-3. Fence untrusted user text in explicit delimiters
-4. Flag suspicious prompt-injection patterns
-5. Deduplicate and throttle bursts before forwarding
-
-See `references/payload-sanitization.md` for details.
+- `memory/coder-tasks.md`
