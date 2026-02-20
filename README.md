@@ -3,25 +3,36 @@
 Production-oriented Rust event pipeline:
 
 1. `webhook-relay` (public VM): validates webhook auth and publishes normalized envelopes to AutoMQ/Kafka.
-2. `automq-consumer` (local, outbound only): consumes `webhooks.*`, forwards to OpenClaw `/hooks/agent`.
+2. `kafka-openclaw-hook` (local, outbound only): consumes `webhooks.*`, forwards to OpenClaw `/hooks/agent`.
 3. Orchestrator session (`coder:orchestrator`): receives all events and coordinates worker subagents.
 
 ## Architecture
 
 ```text
-internet -> nginx:443 -> webhook-relay -> AutoMQ (mTLS) -> automq-consumer -> OpenClaw /hooks/agent
+internet -> nginx:443 -> webhook-relay -> AutoMQ (mTLS) -> kafka-openclaw-hook -> OpenClaw /hooks/agent
 ```
 
 ## Repository Layout
 
+- `apps/README.md`: index of runtime application crates
+- `crates/README.md`: index of shared library crates
 - `src/`: `webhook-relay` app (Axum ingress + Kafka producer)
-- `apps/automq-consumer/`: Kafka consumer + retrying OpenClaw forwarder + DLQ producer
+- `apps/kafka-openclaw-hook/`: Kafka consumer + retrying OpenClaw forwarder + DLQ producer
 - `crates/relay-core/`: shared source models, signature checks, sanitizer, and parity helpers
 - `deploy/nginx/webhook-relay.conf`: TLS termination/proxy config
-- `docker-compose.yml`: nginx + relay + consumer stack
+- `docker-compose.yml`: relay deployment profile (nginx + relay)
+- `docker-compose.dev.yml`: relay dev override profile (proxy trust defaults)
 - `scripts/gen-certs.sh`: mTLS cert generation (CA, relay cert, consumer cert)
 - `systemd/`: service units
 - `memory/coder-tasks.md`: orchestrator task board
+
+## Component Docs and Skills
+
+- Workspace skill: `SKILL.md`
+- Consumer app docs: `apps/kafka-openclaw-hook/README.md`
+- Consumer app skill: `apps/kafka-openclaw-hook/SKILL.md`
+- Shared crate docs: `crates/relay-core/README.md`
+- Shared crate skill: `crates/relay-core/SKILL.md`
 
 ## Relay API
 
@@ -35,8 +46,11 @@ Supported `source` values:
 Behavior:
 
 - verifies source auth (`X-Hub-Signature-256`, `Linear-Signature`)
+- enforces Linear replay window via `webhookTimestamp`
 - parses JSON payload
 - derives `event_type`
+- applies delivery dedup + per-entity cooldown
+- sanitizes untrusted payload fields before publish
 - publishes envelope to topic `webhooks.{source}` asynchronously
 - returns `200` fast when accepted
 
@@ -79,6 +93,9 @@ Unknown source path returns `404`.
 
 - IP rate limit: `100 req/min` (`tower-governor`)
 - Source rate limit: `500 req/min`
+- Delivery dedup TTL: `7d` (default)
+- Per-entity cooldown: `30s` (default)
+- Linear timestamp replay window: `60s` (default)
 - Body limit: `1 MB`
 - Fail-fast auth reject (`401`) with no payload logging
 - AutoMQ communication over mTLS
@@ -99,6 +116,30 @@ Required values to set at minimum:
 - `HMAC_SECRET_LINEAR`
 - `OPENCLAW_WEBHOOK_TOKEN`
 
+Useful optional relay controls:
+
+- `RELAY_DEDUP_TTL_SECONDS` (default `604800`)
+- `RELAY_COOLDOWN_SECONDS` (default `30`)
+- `RELAY_ENFORCE_LINEAR_TIMESTAMP_WINDOW` (default `true`)
+- `RELAY_LINEAR_TIMESTAMP_WINDOW_SECONDS` (default `60`)
+- `RELAY_TRUST_PROXY_HEADERS` (default `false`)
+- `RELAY_TRUSTED_PROXY_CIDRS` (default `127.0.0.1/32,::1/128`)
+
+Useful optional consumer controls:
+
+- `OPENCLAW_AGENT_ID` (default `coder`)
+- `OPENCLAW_SESSION_KEY` (default `coder:orchestrator`)
+- `OPENCLAW_WAKE_MODE` (default `now`)
+- `OPENCLAW_NAME` (default `WebhookRelay`)
+- `OPENCLAW_DELIVER` (default `true`)
+- `OPENCLAW_CHANNEL` (default `telegram`)
+- `OPENCLAW_TO` (default `-1003734912836:topic:2`)
+- `OPENCLAW_MODEL` (default `anthropic/claude-sonnet-4-6`)
+- `OPENCLAW_THINKING` (default `low`)
+- `OPENCLAW_TIMEOUT_SECONDS` (default `600`)
+- `OPENCLAW_MESSAGE_MAX_BYTES` (default `4000`)
+- `OPENCLAW_HTTP_TIMEOUT_SECONDS` (default `20`)
+
 ## Build and Test
 
 Prerequisites:
@@ -114,12 +155,25 @@ cargo test --workspace
 cargo build --workspace --release
 ```
 
+HTTP behavior smoke test (against a running relay):
+
+```bash
+HMAC_SECRET_GITHUB=... HMAC_SECRET_LINEAR=... scripts/smoke-test-rust.sh --relay-url http://127.0.0.1:8080
+```
+
 ## Zero-Lift Init
 
 Bootstrap everything with one command:
 
 ```bash
 scripts/init.sh --up
+```
+
+By default, this starts the `dev` compose profile (relay with dev overrides).
+For explicit relay profile:
+
+```bash
+scripts/init.sh --up --profile relay
 ```
 
 What this does:
@@ -147,29 +201,37 @@ Outputs:
 
 ## Run with Docker Compose
 
+Relay profile (VM/public ingress, relay-only):
 ```bash
-docker compose up --build
+docker compose -f docker-compose.yml up --build
+```
+
+Relay dev override profile:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 ```
 
 Services:
 
 - `nginx` on `443`
 - `webhook-relay`
-- `automq-consumer`
+
+`kafka-openclaw-hook` runs as a native binary (for example via systemd), not in Docker.
 
 ## Systemd Deployment
 
 Install units:
 
 - `systemd/webhook-relay.service`
-- `systemd/automq-consumer.service`
+- `systemd/kafka-openclaw-hook.service`
 
 Then:
 
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now webhook-relay
-sudo systemctl enable --now automq-consumer
+sudo systemctl enable --now kafka-openclaw-hook
 ```
 
 ## Orchestrator Contract
