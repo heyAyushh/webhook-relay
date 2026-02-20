@@ -1,54 +1,48 @@
 # webhook-relay
 
-Relay GitHub and Linear webhooks to an OpenClaw gateway with signature checks, replay protection, cooldown throttling, and payload sanitization for LLM safety.
+Rust webhook relay for GitHub and Linear events targeting OpenClaw, with signature verification, queue-backed delivery, deduplication, cooldown controls, sanitization, retries, metrics, and DLQ replay.
 
-## What it does
+## Current Status
 
-- Accepts webhook events through `adnanh/webhook` (`hooks.yaml`)
-- Routes GitHub PR/review/comment and Linear issue/comment events to relay scripts
-- Verifies signatures (`payload-hmac-sha256` for GitHub via webhook, HMAC validation for Linear in script)
-- Deduplicates repeated deliveries and applies per-entity cooldown windows
-- Sanitizes user-controlled text to reduce prompt-injection risk before forwarding
-- Forwards sanitized payloads to OpenClaw hooks endpoints
+The Rust rewrite is active and runs as a standalone service.
+Legacy shell/Python relay files are kept in this repository for parity references and migration support.
 
-## Repository layout
+## What It Does
 
-- `hooks.yaml`: webhook endpoint and trigger definitions
-- `scripts/relay-github.sh`: GitHub relay, dedup, cooldown, forward
-- `scripts/relay-linear.sh`: Linear relay, signature verification, dedup, cooldown, forward
-- `scripts/sanitize-payload.py`: allowlist extraction, text fencing, injection pattern flagging, truncation
-- `scripts/smoke-test.sh`: end-to-end signed webhook smoke test
-- `references/`: setup and integration runbooks
+- Accepts GitHub and Linear webhook events on HTTP endpoints
+- Verifies webhook signatures before parsing payloads
+- Applies event/type/action filtering
+- Enforces dedup and per-entity cooldown semantics
+- Queues accepted events durably in `redb`
+- Sanitizes untrusted payload content before forwarding to OpenClaw
+- Retries transient forwarding failures with exponential backoff
+- Moves exhausted failures to DLQ and supports replay
+- Exposes Prometheus metrics and health/readiness endpoints
 
-## Prerequisites
+## Endpoints
 
-- `webhook` (https://github.com/adnanh/webhook)
-- `bash`, `curl`, `openssl`, `python3`
+- `POST /hooks/github-pr`
+- `POST /hooks/linear`
+- `GET /health`
+- `GET /ready`
+- `GET /metrics`
+- `GET /admin/queue` (requires admin token)
+- `GET /admin/dlq` (requires admin token)
+- `POST /admin/dlq/replay/{event_id}` (requires admin token)
 
-Install webhook on macOS:
-
-```bash
-brew install webhook
-```
-
-Alternative:
-
-```bash
-go install github.com/adnanh/webhook@latest
-```
-
-## Required environment variables
+## Required Environment Variables
 
 ```bash
+export OPENCLAW_GATEWAY_URL="https://<your-openclaw-gateway>"
+export OPENCLAW_HOOKS_TOKEN="..."
 export GITHUB_WEBHOOK_SECRET="..."
 export LINEAR_WEBHOOK_SECRET="..."
-export OPENCLAW_HOOKS_TOKEN="..."
-export OPENCLAW_GATEWAY_URL="https://<your-openclaw-gateway>"
 ```
 
-Optional runtime controls:
+## Optional Environment Variables
 
-- `WEBHOOK_DEDUP_DIR` (default: `/tmp/webhook-dedup`)
+Parity-compatible controls:
+
 - `WEBHOOK_DEDUP_RETENTION_DAYS` (default: `7`)
 - `GITHUB_COOLDOWN_SECONDS` (default: `30`)
 - `LINEAR_COOLDOWN_SECONDS` (default: `30`)
@@ -56,60 +50,88 @@ Optional runtime controls:
 - `LINEAR_ENFORCE_TIMESTAMP_CHECK` (default: `true`)
 - `WEBHOOK_CURL_CONNECT_TIMEOUT_SECONDS` (default: `5`)
 - `WEBHOOK_CURL_MAX_TIME_SECONDS` (default: `20`)
+- `WEBHOOK_FORWARD_MAX_ATTEMPTS` (default: `5`)
+- `WEBHOOK_FORWARD_INITIAL_BACKOFF_SECONDS` (default: `1`)
+- `WEBHOOK_FORWARD_MAX_BACKOFF_SECONDS` (default: `30`)
+- `LINEAR_AGENT_USER_ID` (default: unset)
 
-## Run locally
+Rust runtime controls:
 
-```bash
-webhook -hooks hooks.yaml -verbose -port 9000
-```
+- `WEBHOOK_BIND_ADDR` (default: `0.0.0.0:9000`)
+- `WEBHOOK_DB_PATH` (default: `/tmp/webhook-relay/relay.redb`)
+- `WEBHOOK_MAX_BODY_BYTES` (default: `524288`)
+- `WEBHOOK_QUEUE_POLL_INTERVAL_MS` (default: `500`)
+- `WEBHOOK_ADMIN_TOKEN` (default: unset; admin APIs disabled)
+- `RUST_LOG` (default: `info`)
 
-Endpoints:
-
-- `POST /hooks/github-pr`
-- `POST /hooks/linear`
-
-## Quick sanitizer check
-
-```bash
-echo '{"action":"opened"}' | python3 scripts/sanitize-payload.py --source github
-```
-
-## Smoke test
-
-Runs webhook server + signed sample events. By default it starts a local mock OpenClaw service and verifies exactly one GitHub and one Linear event are forwarded after deduplication.
+## Run Locally (Rust)
 
 ```bash
-GITHUB_WEBHOOK_SECRET=... \
-LINEAR_WEBHOOK_SECRET=... \
-OPENCLAW_HOOKS_TOKEN=... \
-scripts/smoke-test.sh
+cargo run
 ```
 
-Use live OpenClaw instead of local mock:
+## Test (TDD + parity modules)
+
+```bash
+cargo test
+```
+
+Rust parity smoke test:
 
 ```bash
 GITHUB_WEBHOOK_SECRET=... \
 LINEAR_WEBHOOK_SECRET=... \
 OPENCLAW_HOOKS_TOKEN=... \
-OPENCLAW_GATEWAY_URL=https://<your-openclaw-gateway> \
-scripts/smoke-test.sh -l
+scripts/smoke-test-rust.sh
 ```
 
-## Basic validation before PR
+## Docker
+
+Build image:
 
 ```bash
-bash -n scripts/*.sh
-python3 -m py_compile scripts/sanitize-payload.py
+docker build -t webhook-relay:dev .
 ```
 
-Then run the smoke test command above.
+Run compose stack (relay + mock OpenClaw):
 
-## Security model (high level)
+```bash
+docker compose up --build
+```
 
-1. Verify webhook authenticity (GitHub/Linear signatures)
-2. Extract only needed fields from payloads
-3. Fence untrusted user text in explicit delimiters
-4. Flag suspicious prompt-injection patterns
-5. Deduplicate and throttle bursts before forwarding
+Relay listens on `http://127.0.0.1:9000`.
 
-See `references/payload-sanitization.md` for details.
+## Repository Layout
+
+- `src/`: Rust relay implementation
+- `Dockerfile`: production-focused container image
+- `docker-compose.yml`: local integration stack
+- `firecracker/`: Firecracker runtime templates and service unit
+- `proposal.md`: rewrite proposal and parity contract
+- `references/`: operational and integration runbooks
+- `SKILL.md`: repository skill metadata
+- `scripts/`: legacy relay + sanitizer + smoke test assets retained for migration
+
+## Legacy Assets (Preserved)
+
+The following remain available for migration/parity work:
+
+- `hooks.yaml`
+- `scripts/relay-github.sh`
+- `scripts/relay-linear.sh`
+- `scripts/sanitize-payload.py`
+- `scripts/smoke-test.sh`
+
+## Firecracker Helpers
+
+- Build rootfs/data images: `scripts/build-firecracker-rootfs.sh`
+- Run Firecracker with config: `scripts/run-firecracker.sh`
+- Runtime templates: `firecracker/firecracker-config.template.json`
+
+## Security Model
+
+1. Verify authenticity (HMAC signatures)
+2. Filter unsupported events early
+3. Dedup and cooldown to reduce replay/storm impact
+4. Sanitize user text before LLM-facing downstream calls
+5. Queue and retry transient failures; isolate hard failures in DLQ

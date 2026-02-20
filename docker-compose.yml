@@ -1,0 +1,32 @@
+services:
+  openclaw-mock:
+    image: mendhak/http-https-echo:35
+    container_name: openclaw-mock
+    environment:
+      HTTP_PORT: "8080"
+    ports:
+      - "8080:8080"
+
+  relay:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: webhook-relay
+    depends_on:
+      - openclaw-mock
+    ports:
+      - "9000:9000"
+    environment:
+      WEBHOOK_BIND_ADDR: "0.0.0.0:9000"
+      WEBHOOK_DB_PATH: "/var/lib/webhook-relay/relay.redb"
+      OPENCLAW_GATEWAY_URL: "http://openclaw-mock:8080"
+      OPENCLAW_HOOKS_TOKEN: "dev-token"
+      GITHUB_WEBHOOK_SECRET: "dev-github-secret"
+      LINEAR_WEBHOOK_SECRET: "dev-linear-secret"
+      RUST_LOG: "info"
+    volumes:
+      - relay-data:/var/lib/webhook-relay
+    restart: unless-stopped
+
+volumes:
+  relay-data:
