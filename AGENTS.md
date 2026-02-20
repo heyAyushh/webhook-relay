@@ -1,45 +1,61 @@
 # Repository Guidelines
 
-## Project Structure & Module Organization
-- `hooks.yaml`: webhook endpoint definitions (`github-pr`, `linear`) and env mapping from inbound requests.
-- `scripts/`: operational code.
-  - `relay-github.sh`, `relay-linear.sh`: verify, deduplicate, cooldown, and forward events.
-  - `sanitize-payload.py`: sanitizes untrusted webhook text before forwarding to OpenClaw.
-  - `smoke-test.sh`: end-to-end validation with a local mock OpenClaw service.
-  - `commit-and-push.sh`: helper for committing/pushing from non-protected branches.
-- `references/`: runbooks and integration docs (GitHub, Linear, Tailscale, setup flow).
-- `SKILL.md`: high-level capabilities and usage context for this repository.
+## Project Structure
 
-## Build, Test, and Development Commands
-- Install required webhook server: `brew install webhook`  
-  Alternative: `go install github.com/adnanh/webhook@latest`.
-- Run locally: `webhook -hooks hooks.yaml -verbose -port 9000`.
-- Quick sanitizer check:  
-  `echo '{"action":"opened"}' | python3 scripts/sanitize-payload.py --source github`.
-- Run smoke test with local mock OpenClaw:  
-  `GITHUB_WEBHOOK_SECRET=... LINEAR_WEBHOOK_SECRET=... OPENCLAW_HOOKS_TOKEN=... scripts/smoke-test.sh`.
-- Run smoke test against live OpenClaw: add `OPENCLAW_GATEWAY_URL=...` and pass `-l`.
+- `src/`: `webhook-relay` ingress service.
+  - `main.rs`: Axum server, `/webhook/{source}`, health/readiness, rate limiting.
+  - `producer.rs`: Kafka producer with retry/backoff worker.
+  - `sources/`: source-specific auth + event extraction (`github`, `linear`, `gmail`).
+- `apps/automq-consumer/`: outbound-only consumer daemon.
+  - `consumer.rs`: Kafka consume loop and commit behavior.
+  - `forwarder.rs`: POST `/hooks/agent` with retry policy.
+  - `dlq.rs`: publish exhausted failures to DLQ topic.
+- `crates/relay-core/`: shared models/signatures/sanitization logic.
+- `deploy/nginx/`: TLS termination config.
+- `systemd/`: runtime unit files.
+- `scripts/gen-certs.sh`: mTLS bootstrap helper.
+- `memory/coder-tasks.md`: orchestrator shared state board.
 
-## Coding Style & Naming Conventions
-- Bash: start with `#!/usr/bin/env bash`, `set -euo pipefail`, and `IFS=$'\n\t'`.
-- Use named `readonly` constants (no magic numbers) and descriptive `snake_case` function names.
-- Keep functions focused on one responsibility (`require_env`, `verify_linear_signature`, etc.).
-- Python (`scripts/sanitize-payload.py`): follow PEP 8, keep type hints, and prefer explicit helper names.
-- Comments should explain intent/risk tradeoffs (especially security logic), not obvious steps.
+## Build, Test, and Dev Commands
 
-## Testing Guidelines
-- Primary validation is `scripts/smoke-test.sh` (signature handling, dedup, cooldown, forwarding).
-- Before opening a PR, run at least:
-  - `bash -n scripts/*.sh`
-  - `python3 -m py_compile scripts/sanitize-payload.py`
-  - the smoke test command above.
-- Update smoke scenarios when changing hook rules, signature verification, or payload sanitization behavior.
+- Format: `cargo fmt --all`
+- Lint (if installed): `cargo clippy --workspace --all-targets -- -D warnings`
+- Test: `cargo test --workspace`
+- Release build: `cargo build --workspace --release`
+- Generate mTLS certs: `scripts/gen-certs.sh`
+- Start stack: `docker compose up --build`
 
-## Commit & Pull Request Guidelines
-- Use Conventional Commits; current history follows prefixes like `feat:`, `docs:`, and `chore:`.
-- Write imperative, meaningful summaries (example: `feat: add webhook relay and smoke test scripts`).
+## Coding Standards
+
+- Rust-first codebase; prefer explicit types on boundary structs/config.
+- No magic numbers: define constants with clear names.
+- Keep functions single-purpose and small; extract helpers early.
+- Fail closed on auth/validation paths.
+- Never log webhook payload bodies on auth failures.
+- Keep source-specific security logic in `src/sources/*`.
+
+## Testing Expectations
+
+- Add/adjust unit tests when changing:
+  - signature validation
+  - event-type extraction
+  - retry/backoff behavior
+  - envelope schema
+- Minimum pre-PR checks:
+  - `cargo fmt --all`
+  - `cargo test --workspace`
+  - `cargo build --workspace --release`
+
+## Commit and PR Guidelines
+
+- Use Conventional Commits.
+- Keep commits scoped by component (`relay`, `consumer`, `docs`, `ops`).
 - PRs should include:
-  - a short summary of behavior changes,
-  - a test plan with exact commands executed,
-  - linked issue/context when applicable,
-  - payload or log snippets for relay-path changes.
+  - behavior summary
+  - exact test commands run
+  - config/deploy impact (`.env`, compose, systemd, TLS)
+
+## Notes
+
+- Legacy shell/Python relay scripts are migration references only and not part of the Rust runtime path.
+- If a requested skill like `$init` is not available in session skills, proceed with the closest manual equivalent and document the outcome.

@@ -1,33 +1,48 @@
-# webhook-relay
+# Webhook Relay -> AutoMQ -> OpenClaw
 
-Hardened webhook pipeline for OpenClaw:
+Production-oriented Rust event pipeline:
 
-1. `webhook-relay` (public VM) validates inbound webhooks and publishes normalized envelopes to Kafka/AutoMQ.
-2. `automq-consumer` (outbound only) consumes envelopes and POSTs to local OpenClaw `/hooks/agent`.
-3. `coder:orchestrator` receives all events in one session and coordinates worker subagents.
+1. `webhook-relay` (public VM): validates webhook auth and publishes normalized envelopes to AutoMQ/Kafka.
+2. `automq-consumer` (local, outbound only): consumes `webhooks.*`, forwards to OpenClaw `/hooks/agent`.
+3. Orchestrator session (`coder:orchestrator`): receives all events and coordinates worker subagents.
 
-## Workspace Layout
+## Architecture
 
-- `src/`: `webhook-relay` binary (Axum + Kafka producer)
-- `apps/automq-consumer/`: consumer binary (Kafka consumer + OpenClaw forwarder + DLQ)
-- `crates/relay-core/`: shared source/signature/model logic
+```text
+internet -> nginx:443 -> webhook-relay -> AutoMQ (mTLS) -> automq-consumer -> OpenClaw /hooks/agent
+```
+
+## Repository Layout
+
+- `src/`: `webhook-relay` app (Axum ingress + Kafka producer)
+- `apps/automq-consumer/`: Kafka consumer + retrying OpenClaw forwarder + DLQ producer
+- `crates/relay-core/`: shared source models, signature checks, sanitizer, and parity helpers
+- `deploy/nginx/webhook-relay.conf`: TLS termination/proxy config
+- `docker-compose.yml`: nginx + relay + consumer stack
 - `scripts/gen-certs.sh`: mTLS cert generation (CA, relay cert, consumer cert)
-- `deploy/nginx/webhook-relay.conf`: TLS termination + proxy
-- `systemd/`: service units for relay and consumer
-- `memory/coder-tasks.md`: shared orchestrator task board
-
-## Legacy Scripts
-
-Legacy shell/Python scripts are still kept in `scripts/` for migration fallback and parity reference.
-They are not required for the new Rust runtime path (`webhook-relay` + `automq-consumer`).
+- `systemd/`: service units
+- `memory/coder-tasks.md`: orchestrator task board
 
 ## Relay API
 
-- `POST /webhook/{source}`
-  - `source`: `github`, `linear`, `gmail`
-  - validates source signature/token
-  - normalizes payload into envelope and queues async Kafka publish
-  - returns `200 OK` quickly on accepted enqueue
+### `POST /webhook/{source}`
+
+Supported `source` values:
+
+- `github`
+- `linear`
+- `gmail`
+
+Behavior:
+
+- verifies source auth (`X-Hub-Signature-256`, `Linear-Signature`, `X-Goog-Token`)
+- parses JSON payload
+- derives `event_type`
+- publishes envelope to topic `webhooks.{source}` asynchronously
+- returns `200` fast when accepted
+
+Other endpoints:
+
 - `GET /health`
 - `GET /ready`
 
@@ -47,65 +62,36 @@ Unknown source path returns `404`.
 
 ## Security Controls
 
-- Per-IP rate limit: `100 req/min` (`tower-governor`)
-- Per-source rate limit: `500 req/min`
-- Body size limit: `1 MB`
-- HMAC/token verification before JSON parse acceptance
-- No payload body logging on auth failures
-- mTLS between relay/consumer and AutoMQ
+- IP rate limit: `100 req/min` (`tower-governor`)
+- Source rate limit: `500 req/min`
+- Body limit: `1 MB`
+- Fail-fast auth reject (`401`) with no payload logging
+- AutoMQ communication over mTLS
+- Consumer has no inbound ports
 
-## Environment Variables
+## Configuration
 
-### `webhook-relay`
+Use `.env.default` as your base:
 
-Required:
+```bash
+cp .env.default .env
+```
+
+Required values to set at minimum:
 
 - `KAFKA_BROKERS`
-- `KAFKA_TLS_CERT`
-- `KAFKA_TLS_KEY`
-- `KAFKA_TLS_CA`
 - `HMAC_SECRET_GITHUB`
 - `HMAC_SECRET_LINEAR`
 - `HMAC_SECRET_GMAIL`
-
-Optional:
-
-- `RELAY_BIND` (default: `0.0.0.0:8080`)
-- `RELAY_MAX_PAYLOAD_BYTES` (default: `1048576`)
-- `RELAY_IP_RATE_PER_MINUTE` (default: `100`)
-- `RELAY_SOURCE_RATE_PER_MINUTE` (default: `500`)
-- `RELAY_PUBLISH_QUEUE_CAPACITY` (default: `4096`)
-- `RELAY_PUBLISH_MAX_RETRIES` (default: `5`)
-- `RELAY_PUBLISH_BACKOFF_BASE_MS` (default: `200`)
-- `RELAY_PUBLISH_BACKOFF_MAX_MS` (default: `5000`)
-
-### `automq-consumer`
-
-Required:
-
-- `KAFKA_BROKERS`
-- `KAFKA_TLS_CERT`
-- `KAFKA_TLS_KEY`
-- `KAFKA_TLS_CA`
-- `KAFKA_TOPICS`
-- `OPENCLAW_WEBHOOK_URL`
 - `OPENCLAW_WEBHOOK_TOKEN`
 
-Optional:
-
-- `KAFKA_GROUP_ID` (default: `openclaw-consumer`)
-- `KAFKA_DLQ_TOPIC` (default: `webhooks.dlq`)
-- `CONSUMER_MAX_RETRIES` (default: `5`)
-- `CONSUMER_BACKOFF_BASE_SECONDS` (default: `1`)
-- `CONSUMER_BACKOFF_MAX_SECONDS` (default: `30`)
-
-## Local Build/Test
+## Build and Test
 
 Prerequisites:
 
 - Rust stable
 - OpenSSL
-- CMake (required by `rdkafka-sys`)
+- CMake (for `rdkafka-sys`)
 
 Run:
 
@@ -114,9 +100,9 @@ cargo test --workspace
 cargo build --workspace --release
 ```
 
-## Certificates (mTLS)
+## mTLS Certificates
 
-Generate CA and client certs:
+Generate local cert material:
 
 ```bash
 scripts/gen-certs.sh
@@ -128,26 +114,26 @@ Outputs:
 - `certs/relay.crt`, `certs/relay.key`
 - `certs/consumer.crt`, `certs/consumer.key`
 
-## Docker Compose (VM stack)
-
-`docker-compose.yml` includes:
-
-- `nginx` (TLS termination on `443`)
-- `webhook-relay`
-- `automq-consumer`
-
-Run:
+## Run with Docker Compose
 
 ```bash
 docker compose up --build
 ```
 
-## Systemd Units
+Services:
+
+- `nginx` on `443`
+- `webhook-relay`
+- `automq-consumer`
+
+## Systemd Deployment
+
+Install units:
 
 - `systemd/webhook-relay.service`
 - `systemd/automq-consumer.service`
 
-Install to `/etc/systemd/system/`, then:
+Then:
 
 ```bash
 sudo systemctl daemon-reload
@@ -155,17 +141,15 @@ sudo systemctl enable --now webhook-relay
 sudo systemctl enable --now automq-consumer
 ```
 
-## OpenClaw Orchestrator
+## Orchestrator Contract
 
-Use fixed session key: `coder:orchestrator`.
-
-Consumer forwards a single payload shape to `/hooks/agent` with:
+Consumer forwards all events to the same session:
 
 - `agentId = coder`
 - `sessionKey = coder:orchestrator`
 - `channel = telegram`
 - `to = -1003734912836:topic:2`
 
-Shared board file for cross-session awareness:
+Task board file:
 
 - `memory/coder-tasks.md`
