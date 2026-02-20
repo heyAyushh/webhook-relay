@@ -1,0 +1,5 @@
+services:
+  webhook-relay:
+    environment:
+      RELAY_TRUST_PROXY_HEADERS: "${RELAY_TRUST_PROXY_HEADERS:-true}"
+      RELAY_TRUSTED_PROXY_CIDRS: "${RELAY_TRUSTED_PROXY_CIDRS:-172.16.0.0/12,10.0.0.0/8,192.168.0.0/16,127.0.0.1/32,::1/128}"

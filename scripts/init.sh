@@ -12,6 +12,7 @@ readonly TLS_KEY_FILE="${CERTS_DIR}/tls.key"
 readonly DEPLOY_ENV_DIR="${REPO_ROOT}/deploy/env"
 
 START_STACK=0
+COMPOSE_PROFILE="dev"
 
 log() {
   printf '%s\n' "$*"
@@ -19,10 +20,11 @@ log() {
 
 usage() {
   cat <<'EOF_USAGE'
-Usage: scripts/init.sh [--up]
+Usage: scripts/init.sh [--up] [--profile dev|relay]
 
 Options:
-  --up    Start docker compose stack after bootstrap
+  --up               Start docker compose stack after bootstrap
+  --profile <name>   Compose profile: dev (default, relay overrides) or relay
   -h      Show help
 EOF_USAGE
 }
@@ -39,6 +41,15 @@ parse_args() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --up) START_STACK=1 ;;
+      --profile)
+        [ "$#" -ge 2 ] || {
+          log "error: missing value for --profile"
+          usage
+          exit 1
+        }
+        COMPOSE_PROFILE="$2"
+        shift
+        ;;
       -h|--help) usage; exit 0 ;;
       *)
         log "error: unknown option: $1"
@@ -150,6 +161,12 @@ RELAY_BIND=$(env_value "RELAY_BIND")
 RELAY_MAX_PAYLOAD_BYTES=$(env_value "RELAY_MAX_PAYLOAD_BYTES")
 RELAY_IP_RATE_PER_MINUTE=$(env_value "RELAY_IP_RATE_PER_MINUTE")
 RELAY_SOURCE_RATE_PER_MINUTE=$(env_value "RELAY_SOURCE_RATE_PER_MINUTE")
+RELAY_TRUST_PROXY_HEADERS=$(env_value "RELAY_TRUST_PROXY_HEADERS")
+RELAY_TRUSTED_PROXY_CIDRS=$(env_value "RELAY_TRUSTED_PROXY_CIDRS")
+RELAY_DEDUP_TTL_SECONDS=$(env_value "RELAY_DEDUP_TTL_SECONDS")
+RELAY_COOLDOWN_SECONDS=$(env_value "RELAY_COOLDOWN_SECONDS")
+RELAY_ENFORCE_LINEAR_TIMESTAMP_WINDOW=$(env_value "RELAY_ENFORCE_LINEAR_TIMESTAMP_WINDOW")
+RELAY_LINEAR_TIMESTAMP_WINDOW_SECONDS=$(env_value "RELAY_LINEAR_TIMESTAMP_WINDOW_SECONDS")
 RELAY_PUBLISH_QUEUE_CAPACITY=$(env_value "RELAY_PUBLISH_QUEUE_CAPACITY")
 RELAY_PUBLISH_MAX_RETRIES=$(env_value "RELAY_PUBLISH_MAX_RETRIES")
 RELAY_PUBLISH_BACKOFF_BASE_MS=$(env_value "RELAY_PUBLISH_BACKOFF_BASE_MS")
@@ -167,7 +184,7 @@ HMAC_SECRET_LINEAR=$(env_value "HMAC_SECRET_LINEAR")
 RUST_LOG=$(env_value "RUST_LOG")
 EOF_RELAY
 
-  cat > "${DEPLOY_ENV_DIR}/consumer.env" <<EOF_CONSUMER
+  cat > "${DEPLOY_ENV_DIR}/kafka-openclaw-hook.env" <<EOF_CONSUMER
 KAFKA_BROKERS=$(env_value "KAFKA_BROKERS")
 KAFKA_TLS_CERT=/etc/consumer/certs/consumer.crt
 KAFKA_TLS_KEY=/etc/consumer/certs/consumer.key
@@ -177,6 +194,18 @@ KAFKA_TOPICS=$(env_value "KAFKA_TOPICS")
 KAFKA_DLQ_TOPIC=$(env_value "KAFKA_DLQ_TOPIC")
 OPENCLAW_WEBHOOK_URL=$(env_value "OPENCLAW_WEBHOOK_URL")
 OPENCLAW_WEBHOOK_TOKEN=$(env_value "OPENCLAW_WEBHOOK_TOKEN")
+OPENCLAW_AGENT_ID=$(env_value "OPENCLAW_AGENT_ID")
+OPENCLAW_SESSION_KEY=$(env_value "OPENCLAW_SESSION_KEY")
+OPENCLAW_WAKE_MODE=$(env_value "OPENCLAW_WAKE_MODE")
+OPENCLAW_NAME=$(env_value "OPENCLAW_NAME")
+OPENCLAW_DELIVER=$(env_value "OPENCLAW_DELIVER")
+OPENCLAW_CHANNEL=$(env_value "OPENCLAW_CHANNEL")
+OPENCLAW_TO=$(env_value "OPENCLAW_TO")
+OPENCLAW_MODEL=$(env_value "OPENCLAW_MODEL")
+OPENCLAW_THINKING=$(env_value "OPENCLAW_THINKING")
+OPENCLAW_TIMEOUT_SECONDS=$(env_value "OPENCLAW_TIMEOUT_SECONDS")
+OPENCLAW_MESSAGE_MAX_BYTES=$(env_value "OPENCLAW_MESSAGE_MAX_BYTES")
+OPENCLAW_HTTP_TIMEOUT_SECONDS=$(env_value "OPENCLAW_HTTP_TIMEOUT_SECONDS")
 CONSUMER_MAX_RETRIES=$(env_value "CONSUMER_MAX_RETRIES")
 CONSUMER_BACKOFF_BASE_SECONDS=$(env_value "CONSUMER_BACKOFF_BASE_SECONDS")
 CONSUMER_BACKOFF_MAX_SECONDS=$(env_value "CONSUMER_BACKOFF_MAX_SECONDS")
@@ -184,7 +213,7 @@ RUST_LOG=$(env_value "RUST_LOG")
 EOF_CONSUMER
 
   log "wrote ${DEPLOY_ENV_DIR}/relay.env"
-  log "wrote ${DEPLOY_ENV_DIR}/consumer.env"
+  log "wrote ${DEPLOY_ENV_DIR}/kafka-openclaw-hook.env"
 }
 
 start_stack_if_requested() {
@@ -193,8 +222,21 @@ start_stack_if_requested() {
   fi
 
   require_cmd docker
-  (cd "${REPO_ROOT}" && docker compose up --build -d)
-  log "docker compose stack started"
+
+  case "${COMPOSE_PROFILE}" in
+    dev)
+      (cd "${REPO_ROOT}" && docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build -d)
+      log "docker compose dev stack started (relay only, dev overrides)"
+      ;;
+    relay)
+      (cd "${REPO_ROOT}" && docker compose -f docker-compose.yml up --build -d)
+      log "docker compose relay stack started (relay only)"
+      ;;
+    *)
+      log "error: unsupported profile '${COMPOSE_PROFILE}' (expected: dev or relay)"
+      exit 1
+      ;;
+  esac
 }
 
 main() {
@@ -209,15 +251,33 @@ main() {
   ensure_default "RELAY_MAX_PAYLOAD_BYTES" "1048576"
   ensure_default "RELAY_IP_RATE_PER_MINUTE" "100"
   ensure_default "RELAY_SOURCE_RATE_PER_MINUTE" "500"
+  ensure_default "RELAY_TRUST_PROXY_HEADERS" "false"
+  ensure_default "RELAY_TRUSTED_PROXY_CIDRS" "127.0.0.1/32,::1/128"
+  ensure_default "RELAY_DEDUP_TTL_SECONDS" "604800"
+  ensure_default "RELAY_COOLDOWN_SECONDS" "30"
+  ensure_default "RELAY_ENFORCE_LINEAR_TIMESTAMP_WINDOW" "true"
+  ensure_default "RELAY_LINEAR_TIMESTAMP_WINDOW_SECONDS" "60"
   ensure_default "KAFKA_AUTO_CREATE_TOPICS" "true"
   ensure_default "KAFKA_TOPIC_PARTITIONS" "3"
   ensure_default "KAFKA_TOPIC_REPLICATION_FACTOR" "1"
   ensure_default "KAFKA_DLQ_TOPIC" "webhooks.dlq"
-  ensure_default "KAFKA_GROUP_ID" "openclaw-consumer"
+  ensure_default "KAFKA_GROUP_ID" "kafka-openclaw-hook"
   ensure_default "KAFKA_TOPICS" "webhooks.github,webhooks.linear"
   ensure_default "CONSUMER_MAX_RETRIES" "5"
   ensure_default "CONSUMER_BACKOFF_BASE_SECONDS" "1"
   ensure_default "CONSUMER_BACKOFF_MAX_SECONDS" "30"
+  ensure_default "OPENCLAW_AGENT_ID" "coder"
+  ensure_default "OPENCLAW_SESSION_KEY" "coder:orchestrator"
+  ensure_default "OPENCLAW_WAKE_MODE" "now"
+  ensure_default "OPENCLAW_NAME" "WebhookRelay"
+  ensure_default "OPENCLAW_DELIVER" "true"
+  ensure_default "OPENCLAW_CHANNEL" "telegram"
+  ensure_default "OPENCLAW_TO" "-1003734912836:topic:2"
+  ensure_default "OPENCLAW_MODEL" "anthropic/claude-sonnet-4-6"
+  ensure_default "OPENCLAW_THINKING" "low"
+  ensure_default "OPENCLAW_TIMEOUT_SECONDS" "600"
+  ensure_default "OPENCLAW_MESSAGE_MAX_BYTES" "4000"
+  ensure_default "OPENCLAW_HTTP_TIMEOUT_SECONDS" "20"
   ensure_default "RUST_LOG" "info"
   ensure_default "OPENCLAW_WEBHOOK_URL" "http://127.0.0.1:18789/hooks/agent"
 
