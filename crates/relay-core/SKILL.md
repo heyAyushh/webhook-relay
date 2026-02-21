@@ -3,8 +3,8 @@ name: relay-core
 description: >
   Maintain the shared relay-core crate for signatures, sanitization, timestamp
   verification, key generation, and envelope models used across webhook-relay
-  and kafka-openclaw-hook. Use when changing shared contracts or security-critical
-  validation logic with parity requirements.
+  and the kafka-openclaw-hook consumer (separate repo). Use when changing shared
+  contracts or security-critical validation logic with parity requirements.
 ---
 
 # relay-core Skill
@@ -38,4 +38,4 @@ description: >
 
 - Workspace docs: `README.md`
 - Relay ingress app: `src/`
-- Consumer app: `apps/kafka-openclaw-hook/src/`
+- Consumer app (separate repo): `https://github.com/heyAyushh/kafka-openclaw-hook`
