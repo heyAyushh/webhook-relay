@@ -1,15 +1,15 @@
-# Webhook Relay -> AutoMQ -> OpenClaw
+# Webhook Relay -> AutoMQ
 
-Production-oriented Rust event pipeline:
+Production-oriented Rust event pipeline ingress:
 
 1. `webhook-relay` (public VM): validates webhook auth and publishes normalized envelopes to AutoMQ/Kafka.
-2. `kafka-openclaw-hook` (local, outbound only): consumes `webhooks.*`, forwards to OpenClaw `/hooks/agent`.
+2. `kafka-openclaw-hook` (separate repo, outbound only): consumes `webhooks.*`, forwards to OpenClaw `/hooks/agent`.
 3. Orchestrator session (`coder:orchestrator`): receives all events and coordinates worker subagents.
 
 ## Architecture
 
 ```text
-internet -> nginx:443 -> webhook-relay -> AutoMQ (mTLS) -> kafka-openclaw-hook -> OpenClaw /hooks/agent
+internet -> nginx:443 -> webhook-relay -> AutoMQ (mTLS) -> [kafka-openclaw-hook, separate repo] -> OpenClaw /hooks/agent
 ```
 
 ## Repository Layout
@@ -17,7 +17,6 @@ internet -> nginx:443 -> webhook-relay -> AutoMQ (mTLS) -> kafka-openclaw-hook -
 - `apps/README.md`: index of runtime application crates
 - `crates/README.md`: index of shared library crates
 - `src/`: `webhook-relay` app (Axum ingress + Kafka producer)
-- `apps/kafka-openclaw-hook/`: Kafka consumer + retrying OpenClaw forwarder + DLQ producer
 - `crates/relay-core/`: shared source models, signature checks, sanitizer, and parity helpers
 - `deploy/nginx/webhook-relay.conf`: TLS termination/proxy config
 - `docker-compose.yml`: relay deployment profile (nginx + relay)
@@ -29,8 +28,6 @@ internet -> nginx:443 -> webhook-relay -> AutoMQ (mTLS) -> kafka-openclaw-hook -
 ## Component Docs and Skills
 
 - Workspace skill: `SKILL.md`
-- Consumer app docs: `apps/kafka-openclaw-hook/README.md`
-- Consumer app skill: `apps/kafka-openclaw-hook/SKILL.md`
 - Shared crate docs: `crates/relay-core/README.md`
 - Shared crate skill: `crates/relay-core/SKILL.md`
 
@@ -114,7 +111,6 @@ Required values to set at minimum:
 - `KAFKA_BROKERS`
 - `HMAC_SECRET_GITHUB`
 - `HMAC_SECRET_LINEAR`
-- `OPENCLAW_WEBHOOK_TOKEN`
 
 Useful optional relay controls:
 
@@ -124,21 +120,6 @@ Useful optional relay controls:
 - `RELAY_LINEAR_TIMESTAMP_WINDOW_SECONDS` (default `60`)
 - `RELAY_TRUST_PROXY_HEADERS` (default `false`)
 - `RELAY_TRUSTED_PROXY_CIDRS` (default `127.0.0.1/32,::1/128`)
-
-Useful optional consumer controls:
-
-- `OPENCLAW_AGENT_ID` (default `coder`)
-- `OPENCLAW_SESSION_KEY` (default `coder:orchestrator`)
-- `OPENCLAW_WAKE_MODE` (default `now`)
-- `OPENCLAW_NAME` (default `WebhookRelay`)
-- `OPENCLAW_DELIVER` (default `true`)
-- `OPENCLAW_CHANNEL` (default `telegram`)
-- `OPENCLAW_TO` (default `-1003734912836:topic:2`)
-- `OPENCLAW_MODEL` (default `anthropic/claude-sonnet-4-6`)
-- `OPENCLAW_THINKING` (default `low`)
-- `OPENCLAW_TIMEOUT_SECONDS` (default `600`)
-- `OPENCLAW_MESSAGE_MAX_BYTES` (default `4000`)
-- `OPENCLAW_HTTP_TIMEOUT_SECONDS` (default `20`)
 
 ## Build and Test
 
@@ -217,21 +198,19 @@ Services:
 - `nginx` on `443`
 - `webhook-relay`
 
-`kafka-openclaw-hook` runs as a native binary (for example via systemd), not in Docker.
+`kafka-openclaw-hook` runs as a native binary (for example via systemd) in its own separate repository, not in Docker.
 
 ## Systemd Deployment
 
-Install units:
+Install unit:
 
 - `systemd/webhook-relay.service`
-- `systemd/kafka-openclaw-hook.service`
 
 Then:
 
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now webhook-relay
-sudo systemctl enable --now kafka-openclaw-hook
 ```
 
 ## Orchestrator Contract

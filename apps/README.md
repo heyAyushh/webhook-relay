@@ -2,7 +2,7 @@
 
 Runtime applications in this workspace:
 
-- `kafka-openclaw-hook/`
-  - Kafka consumer that forwards webhook envelopes to OpenClaw.
-  - Docs: `apps/kafka-openclaw-hook/README.md`
-  - Skill: `apps/kafka-openclaw-hook/SKILL.md`
+> **Note:** `kafka-openclaw-hook` has been moved to its own repository.
+> It consumes `webhooks.*` topics from Kafka and forwards to OpenClaw.
+> The `relay-core` crate it depends on can be referenced via git:
+> `relay-core = { git = "https://github.com/heyAyushh/webhook-relay" }`

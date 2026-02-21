@@ -6,7 +6,6 @@ edition = "2024"
 [workspace]
 members = [
     "crates/relay-core",
-    "apps/kafka-openclaw-hook",
 ]
 resolver = "2"
 

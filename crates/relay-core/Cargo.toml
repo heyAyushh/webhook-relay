@@ -2,6 +2,7 @@
 name = "relay-core"
 version = "0.1.0"
 edition = "2024"
+repository = "https://github.com/heyAyushh/webhook-relay"
 
 [dependencies]
 hex = "0.4.3"
