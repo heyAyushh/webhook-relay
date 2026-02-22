@@ -194,16 +194,6 @@ KAFKA_TOPICS=$(env_value "KAFKA_TOPICS")
 KAFKA_DLQ_TOPIC=$(env_value "KAFKA_DLQ_TOPIC")
 OPENCLAW_WEBHOOK_URL=$(env_value "OPENCLAW_WEBHOOK_URL")
 OPENCLAW_WEBHOOK_TOKEN=$(env_value "OPENCLAW_WEBHOOK_TOKEN")
-OPENCLAW_AGENT_ID=$(env_value "OPENCLAW_AGENT_ID")
-OPENCLAW_SESSION_KEY=$(env_value "OPENCLAW_SESSION_KEY")
-OPENCLAW_WAKE_MODE=$(env_value "OPENCLAW_WAKE_MODE")
-OPENCLAW_NAME=$(env_value "OPENCLAW_NAME")
-OPENCLAW_DELIVER=$(env_value "OPENCLAW_DELIVER")
-OPENCLAW_CHANNEL=$(env_value "OPENCLAW_CHANNEL")
-OPENCLAW_TO=$(env_value "OPENCLAW_TO")
-OPENCLAW_MODEL=$(env_value "OPENCLAW_MODEL")
-OPENCLAW_THINKING=$(env_value "OPENCLAW_THINKING")
-OPENCLAW_TIMEOUT_SECONDS=$(env_value "OPENCLAW_TIMEOUT_SECONDS")
 OPENCLAW_MESSAGE_MAX_BYTES=$(env_value "OPENCLAW_MESSAGE_MAX_BYTES")
 OPENCLAW_HTTP_TIMEOUT_SECONDS=$(env_value "OPENCLAW_HTTP_TIMEOUT_SECONDS")
 CONSUMER_MAX_RETRIES=$(env_value "CONSUMER_MAX_RETRIES")
@@ -266,20 +256,10 @@ main() {
   ensure_default "CONSUMER_MAX_RETRIES" "5"
   ensure_default "CONSUMER_BACKOFF_BASE_SECONDS" "1"
   ensure_default "CONSUMER_BACKOFF_MAX_SECONDS" "30"
-  ensure_default "OPENCLAW_AGENT_ID" "coder"
-  ensure_default "OPENCLAW_SESSION_KEY" "coder:orchestrator"
-  ensure_default "OPENCLAW_WAKE_MODE" "now"
-  ensure_default "OPENCLAW_NAME" "WebhookRelay"
-  ensure_default "OPENCLAW_DELIVER" "true"
-  ensure_default "OPENCLAW_CHANNEL" "telegram"
-  ensure_default "OPENCLAW_TO" "-1003734912836:topic:2"
-  ensure_default "OPENCLAW_MODEL" "anthropic/claude-sonnet-4-6"
-  ensure_default "OPENCLAW_THINKING" "low"
-  ensure_default "OPENCLAW_TIMEOUT_SECONDS" "600"
   ensure_default "OPENCLAW_MESSAGE_MAX_BYTES" "4000"
   ensure_default "OPENCLAW_HTTP_TIMEOUT_SECONDS" "20"
   ensure_default "RUST_LOG" "info"
-  ensure_default "OPENCLAW_WEBHOOK_URL" "http://127.0.0.1:18789/hooks/agent"
+  ensure_default "OPENCLAW_WEBHOOK_URL" "http://127.0.0.1:18789/hooks/coder"
 
   ensure_secret "HMAC_SECRET_GITHUB"
   ensure_secret "HMAC_SECRET_LINEAR"

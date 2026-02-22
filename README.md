@@ -3,13 +3,13 @@
 Production-oriented Rust event pipeline:
 
 1. `webhook-relay` (public VM): validates webhook auth and publishes normalized envelopes to AutoMQ/Kafka.
-2. `kafka-openclaw-hook` (local, outbound only): consumes `webhooks.*`, forwards to OpenClaw `/hooks/agent`.
+2. `kafka-openclaw-hook` (local, outbound only): consumes `webhooks.*`, forwards to OpenClaw `/hooks/coder`.
 3. Orchestrator session (`coder:orchestrator`): receives all events and coordinates worker subagents.
 
 ## Architecture
 
 ```text
-internet -> nginx:443 -> webhook-relay -> AutoMQ (mTLS) -> kafka-openclaw-hook -> OpenClaw /hooks/agent
+internet -> nginx:443 -> webhook-relay -> AutoMQ (mTLS) -> kafka-openclaw-hook -> OpenClaw /hooks/coder
 ```
 
 ## Repository Layout
@@ -50,7 +50,7 @@ Behavior:
 - parses JSON payload
 - derives `event_type`
 - applies delivery dedup + per-entity cooldown
-- sanitizes untrusted payload fields before publish
+- preserves full payload and adds sanitizer risk metadata (`_sanitized`, `_flags`) before publish
 - publishes envelope to topic `webhooks.{source}` asynchronously
 - returns `200` fast when accepted
 
@@ -127,16 +127,9 @@ Useful optional relay controls:
 
 Useful optional consumer controls:
 
-- `OPENCLAW_AGENT_ID` (default `coder`)
-- `OPENCLAW_SESSION_KEY` (default `coder:orchestrator`)
-- `OPENCLAW_WAKE_MODE` (default `now`)
-- `OPENCLAW_NAME` (default `WebhookRelay`)
-- `OPENCLAW_DELIVER` (default `true`)
-- `OPENCLAW_CHANNEL` (default `telegram`)
-- `OPENCLAW_TO` (default `-1003734912836:topic:2`)
-- `OPENCLAW_MODEL` (default `anthropic/claude-sonnet-4-6`)
-- `OPENCLAW_THINKING` (default `low`)
-- `OPENCLAW_TIMEOUT_SECONDS` (default `600`)
+Agent routing (`agentId`, `sessionKey`, `model`, `deliver`, `channel`, etc.)
+is configured in OpenClaw gateway `hooks.mappings` for the `coder` mapped hook,
+not in the consumer. See `openclaw config get hooks.mappings`.
 - `OPENCLAW_MESSAGE_MAX_BYTES` (default `4000`)
 - `OPENCLAW_HTTP_TIMEOUT_SECONDS` (default `20`)
 
@@ -147,6 +140,7 @@ Prerequisites:
 - Rust stable
 - OpenSSL
 - CMake (for `rdkafka-sys`)
+- libcurl headers/dev package (for `rdkafka-sys` on Linux)
 
 Run:
 
@@ -155,10 +149,56 @@ cargo test --workspace
 cargo build --workspace --release
 ```
 
+Build release archives (checksums included):
+
+```bash
+scripts/build-release-binaries.sh
+```
+
 HTTP behavior smoke test (against a running relay):
 
 ```bash
 HMAC_SECRET_GITHUB=... HMAC_SECRET_LINEAR=... scripts/smoke-test-rust.sh --relay-url http://127.0.0.1:8080
+```
+
+Crates publish dry-run:
+
+```bash
+scripts/publish-crates.sh --dry-run
+```
+
+## Install
+
+### Prebuilt binaries (GitHub Releases)
+
+Download the tarball for your target from:
+
+- `webhook-relay-<target-triple>.tar.gz`
+- `kafka-openclaw-hook-<target-triple>.tar.gz`
+
+Example (`x86_64-unknown-linux-gnu`):
+
+```bash
+VERSION=v0.2.0
+curl -LO "https://github.com/heyAyushh/webhook-relay/releases/download/${VERSION}/webhook-relay-x86_64-unknown-linux-gnu.tar.gz"
+curl -LO "https://github.com/heyAyushh/webhook-relay/releases/download/${VERSION}/kafka-openclaw-hook-x86_64-unknown-linux-gnu.tar.gz"
+tar -xzf webhook-relay-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf kafka-openclaw-hook-x86_64-unknown-linux-gnu.tar.gz
+sudo install -m 0755 webhook-relay /usr/local/bin/webhook-relay
+sudo install -m 0755 kafka-openclaw-hook /usr/local/bin/kafka-openclaw-hook
+```
+
+### Install from crates.io
+
+```bash
+cargo install webhook-relay --locked
+cargo install kafka-openclaw-hook --locked
+```
+
+Use shared library crate in your project:
+
+```bash
+cargo add relay-core
 ```
 
 ## Zero-Lift Init
@@ -218,6 +258,19 @@ Services:
 - `webhook-relay`
 
 `kafka-openclaw-hook` runs as a native binary (for example via systemd), not in Docker.
+
+## Release and Publish
+
+- CI workflow: `.github/workflows/ci.yml`
+- Binary release workflow (tags `v*`): `.github/workflows/release-binaries.yml`
+- Crates publish workflow (manual dispatch): `.github/workflows/publish-crates.yml`
+- Local helper scripts:
+  - `scripts/build-release-binaries.sh`
+  - `scripts/publish-crates.sh`
+
+Operational release runbook:
+
+- `references/release-publishing.md`
 
 ## Systemd Deployment
 

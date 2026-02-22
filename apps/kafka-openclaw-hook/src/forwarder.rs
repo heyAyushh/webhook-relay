@@ -12,20 +12,16 @@ pub struct Forwarder {
     client: Client,
 }
 
+/// Mapped-hook payload: OpenClaw `hooks.mappings` provides agent/session/model
+/// routing. Consumer only forwards event envelope fields.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct AgentWebhookPayload {
-    agent_id: String,
-    session_key: String,
-    wake_mode: String,
-    name: String,
-    deliver: bool,
-    channel: String,
-    to: String,
-    model: String,
-    thinking: String,
-    timeout_seconds: u64,
-    message: String,
+struct MappedHookPayload {
+    source: String,
+    event_type: String,
+    id: String,
+    received_at: String,
+    payload: String,
 }
 
 #[derive(Debug)]
@@ -77,18 +73,12 @@ impl Forwarder {
         &self,
         envelope: &WebhookEnvelope,
     ) -> std::result::Result<(), ForwardErrorKind> {
-        let payload = AgentWebhookPayload {
-            agent_id: self.config.openclaw_agent_id.clone(),
-            session_key: self.config.openclaw_session_key.clone(),
-            wake_mode: self.config.openclaw_wake_mode.clone(),
-            name: self.config.openclaw_name.clone(),
-            deliver: self.config.openclaw_deliver,
-            channel: self.config.openclaw_channel.clone(),
-            to: self.config.openclaw_to.clone(),
-            model: self.config.openclaw_model.clone(),
-            thinking: self.config.openclaw_thinking.clone(),
-            timeout_seconds: self.config.openclaw_timeout_seconds,
-            message: build_message(envelope, self.config.openclaw_message_max_bytes),
+        let payload = MappedHookPayload {
+            source: envelope.source.clone(),
+            event_type: envelope.event_type.clone(),
+            id: envelope.id.clone(),
+            received_at: envelope.received_at.clone(),
+            payload: summarize_payload(&envelope.payload, self.config.openclaw_message_max_bytes),
         };
 
         let response = match self
@@ -129,54 +119,10 @@ impl Forwarder {
     }
 }
 
-fn build_message(envelope: &WebhookEnvelope, message_max_bytes: usize) -> String {
-    let payload_summary = summarize_payload(&envelope.payload, message_max_bytes);
-    let (flagged_fields, total_hits) = payload_flag_summary(&envelope.payload);
-    let risk_summary = if flagged_fields == 0 {
-        "Risk flags: none".to_string()
-    } else {
-        format!("Risk flags: {flagged_fields} field(s), {total_hits} total hit(s)")
-    };
-    let truncation_summary = if payload_summary.truncated {
-        format!(
-            "Payload bytes: {} (delivered preview bytes: {}, truncated: true)",
-            payload_summary.original_bytes, payload_summary.preview_bytes
-        )
-    } else {
-        format!(
-            "Payload bytes: {} (truncated: false)",
-            payload_summary.original_bytes
-        )
-    };
-
-    format!(
-        "[{}] {}\nEvent ID: {}\n{}\n{}\n\n--- BEGIN UNTRUSTED WEBHOOK PAYLOAD (JSON) ---\n{}\n--- END UNTRUSTED WEBHOOK PAYLOAD ---",
-        envelope.source,
-        envelope.event_type,
-        envelope.id,
-        risk_summary,
-        truncation_summary,
-        payload_summary.preview
-    )
-}
-
-struct PayloadPreview {
-    preview: String,
-    truncated: bool,
-    original_bytes: usize,
-    preview_bytes: usize,
-}
-
-fn summarize_payload(payload: &Value, limit_bytes: usize) -> PayloadPreview {
+fn summarize_payload(payload: &Value, limit_bytes: usize) -> String {
     let serialized = serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_string());
-    let original_bytes = serialized.len();
     if serialized.len() <= limit_bytes {
-        return PayloadPreview {
-            preview_bytes: original_bytes,
-            preview: serialized,
-            truncated: false,
-            original_bytes,
-        };
+        return serialized;
     }
 
     let mut output = String::new();
@@ -187,26 +133,7 @@ fn summarize_payload(payload: &Value, limit_bytes: usize) -> PayloadPreview {
         output.push(character);
     }
     output.push_str("...");
-    PayloadPreview {
-        preview_bytes: output.len(),
-        preview: output,
-        truncated: true,
-        original_bytes,
-    }
-}
-
-fn payload_flag_summary(payload: &Value) -> (usize, u64) {
-    let Some(flags) = payload.get("_flags").and_then(Value::as_array) else {
-        return (0, 0);
-    };
-
-    let mut total_hits = 0u64;
-    for flag in flags {
-        let count = flag.get("count").and_then(Value::as_u64).unwrap_or(0);
-        total_hits = total_hits.saturating_add(count);
-    }
-
-    (flags.len(), total_hits)
+    output
 }
 
 pub fn retry_backoff_seconds(base_seconds: u64, max_seconds: u64, attempt_index: u32) -> u64 {
@@ -231,40 +158,17 @@ mod tests {
     }
 
     #[test]
-    fn message_contains_source_event_and_id() {
-        let envelope = WebhookEnvelope {
-            id: "id-1".to_string(),
-            source: "github".to_string(),
-            event_type: "pull_request.opened".to_string(),
-            received_at: "2026-02-20T14:00:00Z".to_string(),
-            payload: json!({"number":42}),
-        };
-
-        let message = build_message(&envelope, 4_000);
-        assert!(message.contains("[github] pull_request.opened"));
-        assert!(message.contains("Event ID: id-1"));
-        assert!(message.contains("Risk flags: none"));
-        assert!(message.contains("BEGIN UNTRUSTED WEBHOOK PAYLOAD (JSON)"));
-        assert!(message.contains("\"number\":42"));
+    fn summarize_payload_within_limit() {
+        let payload = json!({"number":42});
+        let summary = summarize_payload(&payload, 4_000);
+        assert_eq!(summary, "{\"number\":42}");
     }
 
     #[test]
-    fn message_reports_risk_flags_when_present() {
-        let envelope = WebhookEnvelope {
-            id: "id-2".to_string(),
-            source: "github".to_string(),
-            event_type: "issues.edited".to_string(),
-            received_at: "2026-02-20T14:00:00Z".to_string(),
-            payload: json!({
-                "issue": {"title": "Title"},
-                "_flags": [
-                    {"field":"issue.body","count":2},
-                    {"field":"comment.body","count":1}
-                ]
-            }),
-        };
-
-        let message = build_message(&envelope, 4_000);
-        assert!(message.contains("Risk flags: 2 field(s), 3 total hit(s)"));
+    fn summarize_payload_truncates() {
+        let payload = json!({"long_key": "a]bbbcccdddeee"});
+        let summary = summarize_payload(&payload, 20);
+        assert!(summary.ends_with("..."));
+        assert!(summary.len() <= 20);
     }
 }

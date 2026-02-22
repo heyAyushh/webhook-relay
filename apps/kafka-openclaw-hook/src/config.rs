@@ -4,23 +4,14 @@ use std::env;
 #[derive(Debug, Clone)]
 pub struct Config {
     pub kafka_brokers: String,
-    pub kafka_tls_cert: String,
-    pub kafka_tls_key: String,
-    pub kafka_tls_ca: String,
+    pub kafka_sasl_username: Option<String>,
+    pub kafka_sasl_password: Option<String>,
+    pub kafka_security_protocol: String,
+    pub kafka_sasl_mechanism: Option<String>,
     pub kafka_group_id: String,
     pub kafka_topics: Vec<String>,
     pub openclaw_webhook_url: String,
     pub openclaw_webhook_token: String,
-    pub openclaw_agent_id: String,
-    pub openclaw_session_key: String,
-    pub openclaw_wake_mode: String,
-    pub openclaw_name: String,
-    pub openclaw_deliver: bool,
-    pub openclaw_channel: String,
-    pub openclaw_to: String,
-    pub openclaw_model: String,
-    pub openclaw_thinking: String,
-    pub openclaw_timeout_seconds: u64,
     pub openclaw_message_max_bytes: usize,
     pub openclaw_http_timeout_seconds: u64,
     pub dlq_topic: String,
@@ -46,30 +37,22 @@ impl Config {
 
         let config = Self {
             kafka_brokers: required_env("KAFKA_BROKERS")?,
-            kafka_tls_cert: required_env("KAFKA_TLS_CERT")?,
-            kafka_tls_key: required_env("KAFKA_TLS_KEY")?,
-            kafka_tls_ca: required_env("KAFKA_TLS_CA")?,
+            kafka_sasl_username: env::var("KAFKA_SASL_USERNAME")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+            kafka_sasl_password: env::var("KAFKA_SASL_PASSWORD")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+            kafka_security_protocol: env::var("KAFKA_SECURITY_PROTOCOL")
+                .unwrap_or_else(|_| "PLAINTEXT".to_string()),
+            kafka_sasl_mechanism: env::var("KAFKA_SASL_MECHANISM")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
             kafka_group_id: env::var("KAFKA_GROUP_ID")
                 .unwrap_or_else(|_| "kafka-openclaw-hook".to_string()),
             kafka_topics,
             openclaw_webhook_url: required_env("OPENCLAW_WEBHOOK_URL")?,
             openclaw_webhook_token: required_env("OPENCLAW_WEBHOOK_TOKEN")?,
-            openclaw_agent_id: env::var("OPENCLAW_AGENT_ID")
-                .unwrap_or_else(|_| "coder".to_string()),
-            openclaw_session_key: env::var("OPENCLAW_SESSION_KEY")
-                .unwrap_or_else(|_| "coder:orchestrator".to_string()),
-            openclaw_wake_mode: env::var("OPENCLAW_WAKE_MODE")
-                .unwrap_or_else(|_| "now".to_string()),
-            openclaw_name: env::var("OPENCLAW_NAME").unwrap_or_else(|_| "WebhookRelay".to_string()),
-            openclaw_deliver: env_bool("OPENCLAW_DELIVER", true),
-            openclaw_channel: env::var("OPENCLAW_CHANNEL")
-                .unwrap_or_else(|_| "telegram".to_string()),
-            openclaw_to: env::var("OPENCLAW_TO")
-                .unwrap_or_else(|_| "-1003734912836:topic:2".to_string()),
-            openclaw_model: env::var("OPENCLAW_MODEL")
-                .unwrap_or_else(|_| "anthropic/claude-sonnet-4-6".to_string()),
-            openclaw_thinking: env::var("OPENCLAW_THINKING").unwrap_or_else(|_| "low".to_string()),
-            openclaw_timeout_seconds: env_u64("OPENCLAW_TIMEOUT_SECONDS", 600)?,
             openclaw_message_max_bytes: env_usize("OPENCLAW_MESSAGE_MAX_BYTES", 4_000)?,
             openclaw_http_timeout_seconds: env_u64("OPENCLAW_HTTP_TIMEOUT_SECONDS", 20)?,
             dlq_topic: env::var("KAFKA_DLQ_TOPIC").unwrap_or_else(|_| "webhooks.dlq".to_string()),
@@ -77,10 +60,6 @@ impl Config {
             backoff_base_seconds: env_u64("CONSUMER_BACKOFF_BASE_SECONDS", 1)?,
             backoff_max_seconds: env_u64("CONSUMER_BACKOFF_MAX_SECONDS", 30)?,
         };
-
-        if config.openclaw_timeout_seconds == 0 {
-            return Err(anyhow!("OPENCLAW_TIMEOUT_SECONDS must be greater than 0"));
-        }
 
         if config.openclaw_message_max_bytes < 128 {
             return Err(anyhow!("OPENCLAW_MESSAGE_MAX_BYTES must be at least 128"));
@@ -141,14 +120,4 @@ fn env_usize(name: &str, default: usize) -> Result<usize> {
         })
         .transpose()
         .map(|value| value.unwrap_or(default))
-}
-
-fn env_bool(name: &str, default: bool) -> bool {
-    match env::var(name) {
-        Ok(value) => matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        ),
-        Err(_) => default,
-    }
 }
