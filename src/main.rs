@@ -47,6 +47,11 @@ async fn main() -> Result<()> {
     setup_tracing();
 
     let config = Config::from_env().context("load relay config")?;
+    if config.kafka_security_protocol == "plaintext" {
+        warn!(
+            "kafka plaintext transport is enabled (KAFKA_ALLOW_PLAINTEXT=true); use only on trusted private links"
+        );
+    }
     ensure_required_topics(&config)
         .await
         .context("ensure kafka topics")?;

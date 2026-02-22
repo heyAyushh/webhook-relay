@@ -159,10 +159,15 @@ fn base_client_config(config: &Config) -> ClientConfig {
     let mut client_config = ClientConfig::new();
     client_config
         .set("bootstrap.servers", &config.kafka_brokers)
-        .set("security.protocol", "ssl")
-        .set("ssl.certificate.location", &config.kafka_tls_cert)
-        .set("ssl.key.location", &config.kafka_tls_key)
-        .set("ssl.ca.location", &config.kafka_tls_ca);
+        .set("security.protocol", &config.kafka_security_protocol);
+
+    if config.kafka_security_protocol == "ssl" {
+        client_config
+            .set("ssl.certificate.location", &config.kafka_tls_cert)
+            .set("ssl.key.location", &config.kafka_tls_key)
+            .set("ssl.ca.location", &config.kafka_tls_ca);
+    }
+
     client_config
 }
 

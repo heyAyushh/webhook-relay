@@ -118,12 +118,17 @@ Required values to set at minimum:
 
 Useful optional relay controls:
 
+- `KAFKA_SECURITY_PROTOCOL` (default `ssl`; allowed: `ssl`, `plaintext`)
+- `KAFKA_ALLOW_PLAINTEXT` (default `false`; must be `true` to use `plaintext`)
 - `RELAY_DEDUP_TTL_SECONDS` (default `604800`)
 - `RELAY_COOLDOWN_SECONDS` (default `30`)
 - `RELAY_ENFORCE_LINEAR_TIMESTAMP_WINDOW` (default `true`)
 - `RELAY_LINEAR_TIMESTAMP_WINDOW_SECONDS` (default `60`)
 - `RELAY_TRUST_PROXY_HEADERS` (default `false`)
 - `RELAY_TRUSTED_PROXY_CIDRS` (default `127.0.0.1/32,::1/128`)
+
+Security note:
+- Plaintext Kafka is blocked unless both `KAFKA_SECURITY_PROTOCOL=plaintext` and `KAFKA_ALLOW_PLAINTEXT=true` are set explicitly.
 
 Useful optional consumer controls:
 

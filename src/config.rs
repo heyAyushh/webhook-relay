@@ -6,6 +6,8 @@ use std::env;
 pub struct Config {
     pub bind_addr: String,
     pub kafka_brokers: String,
+    pub kafka_security_protocol: String,
+    pub kafka_allow_plaintext: bool,
     pub kafka_tls_cert: String,
     pub kafka_tls_key: String,
     pub kafka_tls_ca: String,
@@ -35,9 +37,14 @@ impl Config {
         let config = Self {
             bind_addr: env::var("RELAY_BIND").unwrap_or_else(|_| "0.0.0.0:8080".to_string()),
             kafka_brokers: required_env("KAFKA_BROKERS")?,
-            kafka_tls_cert: required_env("KAFKA_TLS_CERT")?,
-            kafka_tls_key: required_env("KAFKA_TLS_KEY")?,
-            kafka_tls_ca: required_env("KAFKA_TLS_CA")?,
+            kafka_security_protocol: env::var("KAFKA_SECURITY_PROTOCOL")
+                .unwrap_or_else(|_| "ssl".to_string())
+                .trim()
+                .to_ascii_lowercase(),
+            kafka_allow_plaintext: env_bool("KAFKA_ALLOW_PLAINTEXT", false),
+            kafka_tls_cert: env::var("KAFKA_TLS_CERT").unwrap_or_default(),
+            kafka_tls_key: env::var("KAFKA_TLS_KEY").unwrap_or_default(),
+            kafka_tls_ca: env::var("KAFKA_TLS_CA").unwrap_or_default(),
             kafka_dlq_topic: env::var("KAFKA_DLQ_TOPIC")
                 .unwrap_or_else(|_| "webhooks.dlq".to_string()),
             kafka_auto_create_topics: env_bool("KAFKA_AUTO_CREATE_TOPICS", true),
@@ -93,6 +100,38 @@ impl Config {
             return Err(anyhow!(
                 "RELAY_TRUSTED_PROXY_CIDRS cannot be empty when RELAY_TRUST_PROXY_HEADERS is enabled"
             ));
+        }
+
+        match config.kafka_security_protocol.as_str() {
+            "ssl" => {
+                if config.kafka_tls_cert.trim().is_empty() {
+                    return Err(anyhow!(
+                        "KAFKA_TLS_CERT is required when KAFKA_SECURITY_PROTOCOL=ssl"
+                    ));
+                }
+                if config.kafka_tls_key.trim().is_empty() {
+                    return Err(anyhow!(
+                        "KAFKA_TLS_KEY is required when KAFKA_SECURITY_PROTOCOL=ssl"
+                    ));
+                }
+                if config.kafka_tls_ca.trim().is_empty() {
+                    return Err(anyhow!(
+                        "KAFKA_TLS_CA is required when KAFKA_SECURITY_PROTOCOL=ssl"
+                    ));
+                }
+            }
+            "plaintext" => {
+                if !config.kafka_allow_plaintext {
+                    return Err(anyhow!(
+                        "KAFKA_SECURITY_PROTOCOL=plaintext requires KAFKA_ALLOW_PLAINTEXT=true"
+                    ));
+                }
+            }
+            other => {
+                return Err(anyhow!(
+                    "unsupported KAFKA_SECURITY_PROTOCOL={other}; expected ssl or plaintext"
+                ));
+            }
         }
 
         Ok(config)
@@ -193,4 +232,180 @@ fn env_cidrs(name: &str, default: &str) -> Result<Vec<IpNet>> {
                 .with_context(|| format!("invalid CIDR for {name}: {value}"))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+    use std::env;
+    use std::sync::{LazyLock, Mutex};
+
+    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    const CONFIG_KEYS: &[&str] = &[
+        "RELAY_BIND",
+        "KAFKA_BROKERS",
+        "KAFKA_SECURITY_PROTOCOL",
+        "KAFKA_ALLOW_PLAINTEXT",
+        "KAFKA_TLS_CERT",
+        "KAFKA_TLS_KEY",
+        "KAFKA_TLS_CA",
+        "KAFKA_DLQ_TOPIC",
+        "KAFKA_AUTO_CREATE_TOPICS",
+        "KAFKA_TOPIC_PARTITIONS",
+        "KAFKA_TOPIC_REPLICATION_FACTOR",
+        "HMAC_SECRET_GITHUB",
+        "HMAC_SECRET_LINEAR",
+        "RELAY_MAX_PAYLOAD_BYTES",
+        "RELAY_IP_RATE_PER_MINUTE",
+        "RELAY_SOURCE_RATE_PER_MINUTE",
+        "RELAY_TRUST_PROXY_HEADERS",
+        "RELAY_TRUSTED_PROXY_CIDRS",
+        "RELAY_DEDUP_TTL_SECONDS",
+        "RELAY_COOLDOWN_SECONDS",
+        "RELAY_ENFORCE_LINEAR_TIMESTAMP_WINDOW",
+        "RELAY_LINEAR_TIMESTAMP_WINDOW_SECONDS",
+        "RELAY_PUBLISH_QUEUE_CAPACITY",
+        "RELAY_PUBLISH_MAX_RETRIES",
+        "RELAY_PUBLISH_BACKOFF_BASE_MS",
+        "RELAY_PUBLISH_BACKOFF_MAX_MS",
+    ];
+
+    struct EnvSnapshot {
+        values: Vec<(String, Option<String>)>,
+    }
+
+    impl EnvSnapshot {
+        fn capture(keys: &[&str]) -> Self {
+            let values = keys
+                .iter()
+                .map(|key| ((*key).to_string(), env::var(key).ok()))
+                .collect();
+            Self { values }
+        }
+    }
+
+    impl Drop for EnvSnapshot {
+        fn drop(&mut self) {
+            for (key, value) in self.values.drain(..) {
+                // Safety: tests serialize all env access through ENV_LOCK.
+                unsafe {
+                    match value {
+                        Some(value) => env::set_var(&key, value),
+                        None => env::remove_var(&key),
+                    }
+                }
+            }
+        }
+    }
+
+    fn with_env(overrides: &[(&str, &str)], test_fn: impl FnOnce()) {
+        let _lock = ENV_LOCK.lock().expect("lock env for test");
+        let _snapshot = EnvSnapshot::capture(CONFIG_KEYS);
+
+        for key in CONFIG_KEYS {
+            // Safety: tests serialize all env access through ENV_LOCK.
+            unsafe {
+                env::remove_var(key);
+            }
+        }
+
+        for (key, value) in overrides {
+            // Safety: tests serialize all env access through ENV_LOCK.
+            unsafe {
+                env::set_var(key, value);
+            }
+        }
+
+        test_fn();
+    }
+
+    fn base_required_env<'a>() -> [(&'a str, &'a str); 3] {
+        [
+            ("KAFKA_BROKERS", "broker:9093"),
+            ("HMAC_SECRET_GITHUB", "github-secret"),
+            ("HMAC_SECRET_LINEAR", "linear-secret"),
+        ]
+    }
+
+    #[test]
+    fn default_ssl_requires_tls_material() {
+        let env_vars = base_required_env();
+        with_env(&env_vars, || {
+            let error = Config::from_env().expect_err("config should reject missing TLS vars");
+            assert!(
+                error
+                    .to_string()
+                    .contains("KAFKA_TLS_CERT is required when KAFKA_SECURITY_PROTOCOL=ssl")
+            );
+        });
+    }
+
+    #[test]
+    fn ssl_mode_accepts_config_when_tls_material_is_present() {
+        let env_vars = [
+            ("KAFKA_BROKERS", "broker:9093"),
+            ("HMAC_SECRET_GITHUB", "github-secret"),
+            ("HMAC_SECRET_LINEAR", "linear-secret"),
+            ("KAFKA_SECURITY_PROTOCOL", "ssl"),
+            ("KAFKA_TLS_CERT", "/tmp/client.crt"),
+            ("KAFKA_TLS_KEY", "/tmp/client.key"),
+            ("KAFKA_TLS_CA", "/tmp/ca.crt"),
+        ];
+        with_env(&env_vars, || {
+            let config = Config::from_env().expect("config should accept ssl with tls vars");
+            assert_eq!(config.kafka_security_protocol, "ssl");
+            assert!(!config.kafka_allow_plaintext);
+        });
+    }
+
+    #[test]
+    fn plaintext_requires_explicit_opt_in() {
+        let env_vars = [
+            ("KAFKA_BROKERS", "broker:9093"),
+            ("HMAC_SECRET_GITHUB", "github-secret"),
+            ("HMAC_SECRET_LINEAR", "linear-secret"),
+            ("KAFKA_SECURITY_PROTOCOL", "plaintext"),
+        ];
+        with_env(&env_vars, || {
+            let error = Config::from_env().expect_err("plaintext without opt-in must fail");
+            assert!(
+                error.to_string().contains(
+                    "KAFKA_SECURITY_PROTOCOL=plaintext requires KAFKA_ALLOW_PLAINTEXT=true"
+                )
+            );
+        });
+    }
+
+    #[test]
+    fn plaintext_accepts_when_explicitly_allowed() {
+        let env_vars = [
+            ("KAFKA_BROKERS", "broker:9093"),
+            ("HMAC_SECRET_GITHUB", "github-secret"),
+            ("HMAC_SECRET_LINEAR", "linear-secret"),
+            ("KAFKA_SECURITY_PROTOCOL", "plaintext"),
+            ("KAFKA_ALLOW_PLAINTEXT", "true"),
+        ];
+        with_env(&env_vars, || {
+            let config = Config::from_env().expect("plaintext should be allowed when opted in");
+            assert_eq!(config.kafka_security_protocol, "plaintext");
+            assert!(config.kafka_allow_plaintext);
+        });
+    }
+
+    #[test]
+    fn rejects_unknown_kafka_security_protocol() {
+        let env_vars = [
+            ("KAFKA_BROKERS", "broker:9093"),
+            ("HMAC_SECRET_GITHUB", "github-secret"),
+            ("HMAC_SECRET_LINEAR", "linear-secret"),
+            ("KAFKA_SECURITY_PROTOCOL", "sasl_ssl"),
+        ];
+        with_env(&env_vars, || {
+            let error = Config::from_env().expect_err("unknown protocol must be rejected");
+            assert!(error.to_string().contains(
+                "unsupported KAFKA_SECURITY_PROTOCOL=sasl_ssl; expected ssl or plaintext"
+            ));
+        });
+    }
 }

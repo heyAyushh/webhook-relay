@@ -172,6 +172,8 @@ RELAY_PUBLISH_MAX_RETRIES=$(env_value "RELAY_PUBLISH_MAX_RETRIES")
 RELAY_PUBLISH_BACKOFF_BASE_MS=$(env_value "RELAY_PUBLISH_BACKOFF_BASE_MS")
 RELAY_PUBLISH_BACKOFF_MAX_MS=$(env_value "RELAY_PUBLISH_BACKOFF_MAX_MS")
 KAFKA_BROKERS=$(env_value "KAFKA_BROKERS")
+KAFKA_SECURITY_PROTOCOL=$(env_value "KAFKA_SECURITY_PROTOCOL")
+KAFKA_ALLOW_PLAINTEXT=$(env_value "KAFKA_ALLOW_PLAINTEXT")
 KAFKA_TLS_CERT=/etc/relay/certs/relay.crt
 KAFKA_TLS_KEY=/etc/relay/certs/relay.key
 KAFKA_TLS_CA=/etc/relay/certs/ca.crt
@@ -251,6 +253,8 @@ main() {
   ensure_default "KAFKA_TOPIC_PARTITIONS" "3"
   ensure_default "KAFKA_TOPIC_REPLICATION_FACTOR" "1"
   ensure_default "KAFKA_DLQ_TOPIC" "webhooks.dlq"
+  ensure_default "KAFKA_SECURITY_PROTOCOL" "ssl"
+  ensure_default "KAFKA_ALLOW_PLAINTEXT" "false"
   ensure_default "KAFKA_GROUP_ID" "kafka-openclaw-hook"
   ensure_default "KAFKA_TOPICS" "webhooks.github,webhooks.linear"
   ensure_default "CONSUMER_MAX_RETRIES" "5"
