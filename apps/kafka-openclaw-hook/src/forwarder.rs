@@ -131,16 +131,52 @@ impl Forwarder {
 
 fn build_message(envelope: &WebhookEnvelope, message_max_bytes: usize) -> String {
     let payload_summary = summarize_payload(&envelope.payload, message_max_bytes);
+    let (flagged_fields, total_hits) = payload_flag_summary(&envelope.payload);
+    let risk_summary = if flagged_fields == 0 {
+        "Risk flags: none".to_string()
+    } else {
+        format!("Risk flags: {flagged_fields} field(s), {total_hits} total hit(s)")
+    };
+    let truncation_summary = if payload_summary.truncated {
+        format!(
+            "Payload bytes: {} (delivered preview bytes: {}, truncated: true)",
+            payload_summary.original_bytes, payload_summary.preview_bytes
+        )
+    } else {
+        format!(
+            "Payload bytes: {} (truncated: false)",
+            payload_summary.original_bytes
+        )
+    };
+
     format!(
-        "[{}] {}\nEvent ID: {}\n\n{}",
-        envelope.source, envelope.event_type, envelope.id, payload_summary
+        "[{}] {}\nEvent ID: {}\n{}\n{}\n\n--- BEGIN UNTRUSTED WEBHOOK PAYLOAD (JSON) ---\n{}\n--- END UNTRUSTED WEBHOOK PAYLOAD ---",
+        envelope.source,
+        envelope.event_type,
+        envelope.id,
+        risk_summary,
+        truncation_summary,
+        payload_summary.preview
     )
 }
 
-fn summarize_payload(payload: &Value, limit_bytes: usize) -> String {
+struct PayloadPreview {
+    preview: String,
+    truncated: bool,
+    original_bytes: usize,
+    preview_bytes: usize,
+}
+
+fn summarize_payload(payload: &Value, limit_bytes: usize) -> PayloadPreview {
     let serialized = serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_string());
+    let original_bytes = serialized.len();
     if serialized.len() <= limit_bytes {
-        return serialized;
+        return PayloadPreview {
+            preview_bytes: original_bytes,
+            preview: serialized,
+            truncated: false,
+            original_bytes,
+        };
     }
 
     let mut output = String::new();
@@ -151,7 +187,26 @@ fn summarize_payload(payload: &Value, limit_bytes: usize) -> String {
         output.push(character);
     }
     output.push_str("...");
-    output
+    PayloadPreview {
+        preview_bytes: output.len(),
+        preview: output,
+        truncated: true,
+        original_bytes,
+    }
+}
+
+fn payload_flag_summary(payload: &Value) -> (usize, u64) {
+    let Some(flags) = payload.get("_flags").and_then(Value::as_array) else {
+        return (0, 0);
+    };
+
+    let mut total_hits = 0u64;
+    for flag in flags {
+        let count = flag.get("count").and_then(Value::as_u64).unwrap_or(0);
+        total_hits = total_hits.saturating_add(count);
+    }
+
+    (flags.len(), total_hits)
 }
 
 pub fn retry_backoff_seconds(base_seconds: u64, max_seconds: u64, attempt_index: u32) -> u64 {
@@ -188,6 +243,28 @@ mod tests {
         let message = build_message(&envelope, 4_000);
         assert!(message.contains("[github] pull_request.opened"));
         assert!(message.contains("Event ID: id-1"));
+        assert!(message.contains("Risk flags: none"));
+        assert!(message.contains("BEGIN UNTRUSTED WEBHOOK PAYLOAD (JSON)"));
         assert!(message.contains("\"number\":42"));
+    }
+
+    #[test]
+    fn message_reports_risk_flags_when_present() {
+        let envelope = WebhookEnvelope {
+            id: "id-2".to_string(),
+            source: "github".to_string(),
+            event_type: "issues.edited".to_string(),
+            received_at: "2026-02-20T14:00:00Z".to_string(),
+            payload: json!({
+                "issue": {"title": "Title"},
+                "_flags": [
+                    {"field":"issue.body","count":2},
+                    {"field":"comment.body","count":1}
+                ]
+            }),
+        };
+
+        let message = build_message(&envelope, 4_000);
+        assert!(message.contains("Risk flags: 2 field(s), 3 total hit(s)"));
     }
 }
