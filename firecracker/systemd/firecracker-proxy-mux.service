@@ -1,0 +1,19 @@
+[Unit]
+Description=Firecracker Relay + Kafka Proxy Mux
+After=firecracker@relay.service firecracker@kafka.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+Environment=FIRECRACKER_REPO_ROOT=/opt/webhook-relay
+EnvironmentFile=-/etc/firecracker/runtime.env
+EnvironmentFile=-/etc/firecracker/proxy-mux.env
+ExecStart=/usr/bin/env bash -lc 'exec "${FIRECRACKER_REPO_ROOT}/firecracker/systemd/proxy-mux.sh"'
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

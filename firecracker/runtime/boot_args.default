@@ -1,0 +1,1 @@
+console=ttyS0 reboot=k panic=1 pci=off quiet loglevel=1 8250.nr_uarts=0 no-kvmapf

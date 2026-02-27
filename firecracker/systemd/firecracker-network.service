@@ -1,0 +1,16 @@
+[Unit]
+Description=Firecracker Bridge Network Setup
+Before=firecracker@relay.service firecracker@kafka.service
+After=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=FIRECRACKER_REPO_ROOT=/opt/webhook-relay
+EnvironmentFile=-/etc/firecracker/runtime.env
+EnvironmentFile=-/etc/firecracker/network.env
+ExecStart=/usr/bin/env bash -lc 'exec "${FIRECRACKER_REPO_ROOT}/scripts/setup-firecracker-bridge-network.sh"'
+ExecStop=/usr/bin/env bash -lc 'exec "${FIRECRACKER_REPO_ROOT}/scripts/teardown-firecracker-bridge-network.sh"'
+
+[Install]
+WantedBy=multi-user.target

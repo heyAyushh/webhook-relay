@@ -1,0 +1,11 @@
+{
+  "cgroup_version": "2",
+  "resource_limits": {
+    "no-file": 4096,
+    "fsize": 3221225472
+  },
+  "cgroups": {
+    "cpu.max": "200000 100000",
+    "memory.max": "2306867200"
+  }
+}

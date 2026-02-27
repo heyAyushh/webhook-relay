@@ -1,16 +1,23 @@
 [Unit]
 Description=Webhook Relay Firecracker MicroVM
-After=network-online.target
-Wants=network-online.target
+After=network-online.target firecracker-network.service
+Wants=network-online.target firecracker-network.service
+Requires=firecracker-network.service
 
 [Service]
 Type=simple
 User=root
 Group=root
-ExecStart=/usr/local/bin/firecracker --config-file /opt/webhook-relay/firecracker-config.json
-Restart=always
-RestartSec=3
+Environment=FIRECRACKER_REPO_ROOT=/opt/webhook-relay
+EnvironmentFile=-/etc/firecracker/runtime.env
+EnvironmentFile=/etc/firecracker/relay.env
+ExecStart=/usr/bin/env bash -lc 'exec "${FIRECRACKER_REPO_ROOT}/firecracker/runtime/launch.sh" relay "${FIRECRACKER_CONFIG}" "${FIRECRACKER_SOCKET:-}"'
+ExecStopPost=/usr/bin/env bash -lc 'exec "${FIRECRACKER_REPO_ROOT}/firecracker/runtime/cleanup.sh" relay "${FIRECRACKER_SOCKET:-}"'
+Restart=on-failure
+RestartSec=5
 LimitNOFILE=65535
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
