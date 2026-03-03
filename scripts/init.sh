@@ -127,6 +127,68 @@ ensure_default() {
   fi
 }
 
+source_enabled_in_env() {
+  local source_name="$1"
+  local normalized_source
+  local raw_sources
+  local candidate
+  local normalized_candidate
+
+  normalized_source="$(printf '%s' "${source_name}" | tr '[:upper:]' '[:lower:]')"
+  raw_sources="$(env_value "RELAY_ENABLED_SOURCES")"
+  if [ -z "${raw_sources}" ]; then
+    return 1
+  fi
+
+  IFS=',' read -r -a source_list <<< "${raw_sources}"
+  for candidate in "${source_list[@]}"; do
+    normalized_candidate="$(printf '%s' "${candidate}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
+    if [ "${normalized_candidate}" = "${normalized_source}" ]; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+default_consumer_topics_from_env() {
+  local raw_sources
+  local topic_prefix
+  local candidate
+  local normalized_candidate
+  local topics=()
+  local joined_topics=""
+
+  raw_sources="$(env_value "RELAY_ENABLED_SOURCES")"
+  topic_prefix="$(env_value "RELAY_SOURCE_TOPIC_PREFIX")"
+  if [ -z "${topic_prefix}" ]; then
+    topic_prefix="webhooks"
+  fi
+  if [ -z "${raw_sources}" ]; then
+    printf '%s' "${topic_prefix}.github,${topic_prefix}.linear"
+    return
+  fi
+
+  IFS=',' read -r -a source_list <<< "${raw_sources}"
+  for candidate in "${source_list[@]}"; do
+    normalized_candidate="$(printf '%s' "${candidate}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
+    if [ -n "${normalized_candidate}" ]; then
+      topics+=("${topic_prefix}.${normalized_candidate}")
+    fi
+  done
+
+  if [ "${#topics[@]}" -eq 0 ]; then
+    printf '%s' "${topic_prefix}.github,${topic_prefix}.linear"
+    return
+  fi
+
+  joined_topics="${topics[0]}"
+  for candidate in "${topics[@]:1}"; do
+    joined_topics="${joined_topics},${candidate}"
+  done
+  printf '%s' "${joined_topics}"
+}
+
 ensure_relay_certs() {
   if [ ! -f "${CERTS_DIR}/ca.crt" ] || [ ! -f "${CERTS_DIR}/relay.crt" ] || [ ! -f "${CERTS_DIR}/consumer.crt" ]; then
     "${REPO_ROOT}/scripts/gen-certs.sh" "${CERTS_DIR}"
@@ -158,6 +220,9 @@ write_systemd_env_files() {
 
   cat > "${DEPLOY_ENV_DIR}/relay.env" <<EOF_RELAY
 RELAY_BIND=$(env_value "RELAY_BIND")
+RELAY_ENABLED_SOURCES=$(env_value "RELAY_ENABLED_SOURCES")
+RELAY_SOURCE_TOPIC_PREFIX=$(env_value "RELAY_SOURCE_TOPIC_PREFIX")
+RELAY_SOURCE_TOPICS=$(env_value "RELAY_SOURCE_TOPICS")
 RELAY_MAX_PAYLOAD_BYTES=$(env_value "RELAY_MAX_PAYLOAD_BYTES")
 RELAY_IP_RATE_PER_MINUTE=$(env_value "RELAY_IP_RATE_PER_MINUTE")
 RELAY_SOURCE_RATE_PER_MINUTE=$(env_value "RELAY_SOURCE_RATE_PER_MINUTE")
@@ -183,6 +248,7 @@ KAFKA_TOPIC_REPLICATION_FACTOR=$(env_value "KAFKA_TOPIC_REPLICATION_FACTOR")
 KAFKA_DLQ_TOPIC=$(env_value "KAFKA_DLQ_TOPIC")
 HMAC_SECRET_GITHUB=$(env_value "HMAC_SECRET_GITHUB")
 HMAC_SECRET_LINEAR=$(env_value "HMAC_SECRET_LINEAR")
+HMAC_SECRET_EXAMPLE=$(env_value "HMAC_SECRET_EXAMPLE")
 RUST_LOG=$(env_value "RUST_LOG")
 EOF_RELAY
 
@@ -240,6 +306,8 @@ main() {
   ensure_env_file
 
   ensure_default "RELAY_BIND" "0.0.0.0:8080"
+  ensure_default "RELAY_ENABLED_SOURCES" "github,linear"
+  ensure_default "RELAY_SOURCE_TOPIC_PREFIX" "webhooks"
   ensure_default "RELAY_MAX_PAYLOAD_BYTES" "1048576"
   ensure_default "RELAY_IP_RATE_PER_MINUTE" "100"
   ensure_default "RELAY_SOURCE_RATE_PER_MINUTE" "500"
@@ -256,17 +324,24 @@ main() {
   ensure_default "KAFKA_SECURITY_PROTOCOL" "ssl"
   ensure_default "KAFKA_ALLOW_PLAINTEXT" "false"
   ensure_default "KAFKA_GROUP_ID" "kafka-openclaw-hook"
-  ensure_default "KAFKA_TOPICS" "webhooks.github,webhooks.linear"
+  ensure_default "KAFKA_TOPICS" "$(default_consumer_topics_from_env)"
   ensure_default "CONSUMER_MAX_RETRIES" "5"
   ensure_default "CONSUMER_BACKOFF_BASE_SECONDS" "1"
   ensure_default "CONSUMER_BACKOFF_MAX_SECONDS" "30"
   ensure_default "OPENCLAW_MESSAGE_MAX_BYTES" "4000"
   ensure_default "OPENCLAW_HTTP_TIMEOUT_SECONDS" "20"
   ensure_default "RUST_LOG" "info"
-  ensure_default "OPENCLAW_WEBHOOK_URL" "http://127.0.0.1:18789/hooks/coder"
+  ensure_default "OPENCLAW_WEBHOOK_URL" "http://127.0.0.1:18789/hooks/agent"
 
-  ensure_secret "HMAC_SECRET_GITHUB"
-  ensure_secret "HMAC_SECRET_LINEAR"
+  if source_enabled_in_env "github"; then
+    ensure_secret "HMAC_SECRET_GITHUB"
+  fi
+  if source_enabled_in_env "linear"; then
+    ensure_secret "HMAC_SECRET_LINEAR"
+  fi
+  if source_enabled_in_env "example"; then
+    ensure_secret "HMAC_SECRET_EXAMPLE"
+  fi
   ensure_secret "OPENCLAW_WEBHOOK_TOKEN"
 
   ensure_relay_certs

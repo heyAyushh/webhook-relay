@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::str::FromStr;
 
+pub const DEFAULT_SOURCE_TOPIC_PREFIX: &str = "webhooks";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Source {
@@ -10,6 +12,7 @@ pub enum Source {
 }
 
 impl Source {
+    // Built-in example source names.
     pub fn as_str(self) -> &'static str {
         match self {
             Source::Github => "github",
@@ -23,6 +26,23 @@ impl Source {
             Source::Linear => "webhooks.linear",
         }
     }
+}
+
+pub fn normalize_source_name(source: &str) -> Option<String> {
+    let normalized = source.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+pub fn source_topic_name(source_topic_prefix: &str, source: &str) -> Option<String> {
+    let prefix = source_topic_prefix.trim();
+    if prefix.is_empty() {
+        return None;
+    }
+    normalize_source_name(source).map(|normalized| format!("{prefix}.{normalized}"))
 }
 
 impl FromStr for Source {
@@ -51,4 +71,24 @@ pub struct DlqEnvelope {
     pub failed_at: String,
     pub error: String,
     pub envelope: WebhookEnvelope,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DEFAULT_SOURCE_TOPIC_PREFIX, normalize_source_name, source_topic_name};
+
+    #[test]
+    fn normalizes_source_name() {
+        assert_eq!(normalize_source_name(" GitHub ").as_deref(), Some("github"));
+        assert!(normalize_source_name(" ").is_none());
+    }
+
+    #[test]
+    fn composes_topic_name_from_prefix_and_source() {
+        assert_eq!(
+            source_topic_name(DEFAULT_SOURCE_TOPIC_PREFIX, "Linear").as_deref(),
+            Some("webhooks.linear")
+        );
+        assert!(source_topic_name("", "linear").is_none());
+    }
 }

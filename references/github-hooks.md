@@ -18,7 +18,7 @@
 
 ## Agent Identity
 
-The OpenClaw `coder` agent operates on GitHub as a **GitHub App bot**:
+The OpenClaw `agent` profile operates on GitHub as a **GitHub App bot**:
 
 - The App has its own bot identity: `your-app-name[bot]`
 - Reviews, comments, and status checks posted by the agent appear under this bot name
@@ -77,7 +77,7 @@ GitHub CLI has no `gh app create` subcommand. Use `gh api` with the GitHub App m
 gh auth status || gh auth login -h github.com
 
 # 1) Set required values
-APP_NAME="openclaw-coder"
+APP_NAME="openclaw-agent"
 APP_HOMEPAGE_URL="https://example.com"
 RELAY_BASE_URL="https://your-machine.tail-net.ts.net"
 WEBHOOK_URL="${RELAY_BASE_URL}/hooks/github-pr"
@@ -173,7 +173,7 @@ After conversion, collect/store:
 
 1. Go to **Settings > Developer settings > GitHub Apps > New GitHub App**
 2. Set:
-   - **App name**: `openclaw-coder` (or your preferred name)
+   - **App name**: `openclaw-agent` (or your preferred name)
    - **Homepage URL**: your project URL
    - **Webhook URL**: `https://<relay-host>/hooks/github-pr`
    - **Webhook secret**: value of `GITHUB_WEBHOOK_SECRET`
@@ -328,7 +328,7 @@ Note: GitHub App payloads include an `installation.id` field. This is extracted 
 
 ## Relay Script
 
-Forwards sanitized payloads to OpenClaw `POST /hooks/agent?source=github-pr`. See [openclaw-relay.md](openclaw-relay.md) for how OpenClaw processes the payload (hook mappings, `github-pr.ts` transform, `coder` agent invocation).
+Forwards sanitized payloads to OpenClaw `POST /hooks/agent?source=github-pr`. See [openclaw-relay.md](openclaw-relay.md) for how OpenClaw processes the payload (hook mappings, `github-pr.ts` transform, `agent` invocation).
 
 ```bash
 #!/usr/bin/env bash

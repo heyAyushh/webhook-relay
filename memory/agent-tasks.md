@@ -1,4 +1,4 @@
-# Coder Task Board
+# Agent Task Board
 
 ## Active
 | session_key | source | event | started_at | status |

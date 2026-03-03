@@ -10,7 +10,7 @@
 
 ## Agent Identity
 
-The OpenClaw `coder` agent operates on Linear as a **dedicated Linear user** (service account):
+The OpenClaw `agent` profile operates on Linear as a **dedicated Linear user** (service account):
 
 - Created by the workspace owner as a regular Linear user (e.g. `openclaw-bot@yourteam.com`)
 - Joined to the owner's team so it can view/comment on team issues
@@ -89,7 +89,7 @@ Note: `data.userId` is extracted to identify the actor — used to skip events c
 
 ## Relay Script
 
-Verifies signature and forwards sanitized payloads to OpenClaw `POST /hooks/agent?source=linear`. See [openclaw-relay.md](openclaw-relay.md) for how OpenClaw processes the payload (hook mappings, `linear.ts` transform, `coder` agent invocation).
+Verifies signature and forwards sanitized payloads to OpenClaw `POST /hooks/agent?source=linear`. See [openclaw-relay.md](openclaw-relay.md) for how OpenClaw processes the payload (hook mappings, `linear.ts` transform, `agent` invocation).
 
 ```bash
 #!/usr/bin/env bash

@@ -6,8 +6,9 @@ use rdkafka::client::DefaultClientContext;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::types::RDKafkaErrorCode;
 use rdkafka::util::Timeout;
-use relay_core::model::{Source, WebhookEnvelope};
+use relay_core::model::WebhookEnvelope;
 use serde::Serialize;
+use std::collections::BTreeSet;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, sleep};
 use tracing::{debug, error, info, warn};
@@ -114,23 +115,25 @@ pub async fn ensure_required_topics(config: &Config) -> Result<()> {
         .create()
         .context("create kafka admin client")?;
 
-    let topics = vec![
-        NewTopic::new(
-            Source::Github.topic_name(),
-            config.kafka_topic_partitions,
-            TopicReplication::Fixed(config.kafka_topic_replication_factor),
-        ),
-        NewTopic::new(
-            Source::Linear.topic_name(),
-            config.kafka_topic_partitions,
-            TopicReplication::Fixed(config.kafka_topic_replication_factor),
-        ),
-        NewTopic::new(
-            &config.kafka_dlq_topic,
-            config.kafka_topic_partitions,
-            TopicReplication::Fixed(config.kafka_topic_replication_factor),
-        ),
-    ];
+    let mut topic_names = config
+        .relay_source_topics
+        .iter()
+        .map(|topic| topic.trim())
+        .filter(|topic| !topic.is_empty())
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>();
+    topic_names.insert(config.kafka_dlq_topic.clone());
+
+    let topics = topic_names
+        .iter()
+        .map(|topic| {
+            NewTopic::new(
+                topic,
+                config.kafka_topic_partitions,
+                TopicReplication::Fixed(config.kafka_topic_replication_factor),
+            )
+        })
+        .collect::<Vec<_>>();
 
     let results = admin_client
         .create_topics(&topics, &AdminOptions::new())

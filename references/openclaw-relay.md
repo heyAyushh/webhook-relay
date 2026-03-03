@@ -44,9 +44,9 @@ Detailed step-by-step for a GitHub PR event:
 6. relay-github.sh pipes $GITHUB_PAYLOAD through sanitize-payload.py --source github
 7. relay-github.sh curls POST http://localhost:3000/hooks/agent?source=github-pr
 8. OpenClaw authenticates Bearer token
-9. OpenClaw matches mapping: source=github-pr → transform: github-pr.ts → agentId: coder
+9. OpenClaw matches mapping: source=github-pr → transform: github-pr.ts → agentId: agent
 10. github-pr.ts transform builds agent prompt from sanitized payload
-11. OpenClaw runs coder agent turn (isolated session, returns 202)
+11. OpenClaw runs an `agent` turn (isolated session, returns 202)
 12. Agent reads PR diff, posts review via GitHub App token
 ```
 
@@ -58,9 +58,9 @@ For Linear:
 3. relay-linear.sh verifies HMAC-SHA256 signature manually
 4. relay-linear.sh checks dedup + cooldown
 5. relay-linear.sh sanitizes and curls POST http://localhost:3000/hooks/agent?source=linear
-6. OpenClaw matches mapping: source=linear → transform: linear.ts → agentId: coder
+6. OpenClaw matches mapping: source=linear → transform: linear.ts → agentId: agent
 7. linear.ts transform builds agent prompt from sanitized payload
-8. OpenClaw runs coder agent turn (isolated session, returns 202)
+8. OpenClaw runs an `agent` turn (isolated session, returns 202)
 9. Agent updates Linear issue / posts comment via Linear API
 ```
 
@@ -77,7 +77,7 @@ hooks:
 
   # Restrict which agents can be invoked via hooks
   allowedAgentIds:
-    - coder
+    - agent
 
   # Security: don't let external payloads set session keys
   allowRequestSessionKey: false
@@ -87,22 +87,22 @@ hooks:
   # allowUnsafeExternalContent: false  # keep default
 
   mappings:
-    # GitHub PR events → coder agent (code review context)
+    # GitHub PR events → agent (code review context)
     - match:
         source: github-pr
       action: agent
-      agentId: coder
+      agentId: agent
       transform:
         module: github-pr.ts
       # Optional: route agent responses to a channel
       # deliver: true
       # channel: engineering
 
-    # Linear issue/comment events → coder agent (project context)
+    # Linear issue/comment events → agent (project context)
     - match:
         source: linear
       action: agent
-      agentId: coder
+      agentId: agent
       transform:
         module: linear.ts
 ```
@@ -177,7 +177,7 @@ mappings:
   - match:
       source: github-pr          # matches ?source=github-pr
     action: agent                 # isolated agent turn (not wake)
-    agentId: coder
+    agentId: agent
     transform:
       module: github-pr.ts       # resolved from transformsDir
 ```
@@ -187,7 +187,7 @@ When a request hits `POST /hooks/agent?source=github-pr`:
 2. Loads `~/.openclaw/hooks/transforms/github-pr.ts`
 3. Passes the request body through the transform
 4. Transform returns `{ message, agentId, ... }` — the agent prompt
-5. OpenClaw invokes the `coder` agent with that message
+5. OpenClaw invokes the `agent` profile with that message
 
 ## Transform Modules
 
@@ -202,8 +202,8 @@ Requirements:
 
 ```
 ~/.openclaw/hooks/transforms/
-├── github-pr.ts     # GitHub PR/review events → coder prompt (code review context)
-└── linear.ts        # Linear issue/comment events → coder prompt (project context)
+├── github-pr.ts     # GitHub PR/review events → agent prompt (code review context)
+└── linear.ts        # Linear issue/comment events → agent prompt (project context)
 ```
 
 ## GitHub Transform
@@ -286,7 +286,7 @@ ${pr!.body}
 
 Fetch the diff via GitHub API, review for correctness, security, and style. Post your review.
 `.trim(),
-      agentId: 'coder',
+      agentId: 'agent',
       sessionKey: `hook:github:${repository.full_name}:pr:${pr!.number}`,
     };
   }
@@ -306,7 +306,7 @@ ${review.body}
 
 Analyze the review feedback. If changes are requested, suggest fixes.
 `.trim(),
-      agentId: 'coder',
+      agentId: 'agent',
       sessionKey: `hook:github:${repository.full_name}:pr:${pr!.number}`,
     };
   }
@@ -325,7 +325,7 @@ ${comment.body}
 
 Review the comment in context of the file and respond if actionable.
 `.trim(),
-      agentId: 'coder',
+      agentId: 'agent',
       sessionKey: `hook:github:${repository.full_name}:pr:${pr?.number ?? payload.number}`,
     };
   }
@@ -400,7 +400,7 @@ Analyze this issue. If it's a new task, break it down into implementation steps.
 If it's an update, assess impact on current work and linked PRs.
 Check for linked GitHub PRs via branch name or sync metadata.
 `.trim(),
-      agentId: 'coder',
+      agentId: 'agent',
       sessionKey: `hook:linear:${teamKey}:${data.id}`,
     };
   }
@@ -419,7 +419,7 @@ Review this comment. If it contains questions, provide answers.
 If it contains decisions or scope changes, update the issue accordingly.
 If it references a PR, check the PR status.
 `.trim(),
-      agentId: 'coder',
+      agentId: 'agent',
       sessionKey: `hook:linear:${teamKey}:${data.id}`,
     };
   }

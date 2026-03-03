@@ -1,9 +1,79 @@
-use crate::sources::ValidationError;
+use crate::config::Config;
+use crate::sources::{SourceHandler, ValidationError, header_value, payload_token};
 use axum::http::HeaderMap;
+use relay_core::keys::{linear_cooldown_key, linear_dedup_key};
 use relay_core::signatures::verify_linear_signature;
+use relay_core::timestamps::verify_linear_timestamp_window;
 use serde_json::Value;
 
 const LINEAR_SIGNATURE_HEADER: &str = "Linear-Signature";
+const LINEAR_DELIVERY_HEADER: &str = "Linear-Delivery";
+const UNKNOWN_ACTION: &str = "unknown";
+const LINEAR_SOURCE_NAME: &str = "linear";
+const MISSING_LINEAR_SECRET_MESSAGE: &str = "missing linear secret";
+
+#[derive(Debug, Default)]
+pub struct LinearSourceHandler;
+
+pub static HANDLER: LinearSourceHandler = LinearSourceHandler;
+
+impl SourceHandler for LinearSourceHandler {
+    fn source_name(&self) -> &'static str {
+        LINEAR_SOURCE_NAME
+    }
+
+    fn validate_request(
+        &self,
+        config: &Config,
+        headers: &HeaderMap,
+        body: &[u8],
+    ) -> Result<(), ValidationError> {
+        let secret = config
+            .hmac_secret_linear
+            .as_deref()
+            .ok_or(ValidationError::Unauthorized(MISSING_LINEAR_SECRET_MESSAGE))?;
+        validate(secret, headers, body)
+    }
+
+    fn validate_payload(
+        &self,
+        config: &Config,
+        payload: &Value,
+        now_epoch_seconds: i64,
+    ) -> Result<(), ValidationError> {
+        if verify_linear_timestamp_window(
+            payload,
+            now_epoch_seconds,
+            config.linear_timestamp_window_seconds,
+            config.enforce_linear_timestamp_window,
+        ) {
+            Ok(())
+        } else {
+            Err(ValidationError::Unauthorized(
+                "linear webhook rejected due to timestamp window check",
+            ))
+        }
+    }
+
+    fn event_type(&self, headers: &HeaderMap, payload: &Value) -> Result<String, ValidationError> {
+        event_type(headers, payload)
+    }
+
+    fn dedup_key(&self, headers: &HeaderMap, payload: &Value) -> Result<String, ValidationError> {
+        let delivery_id = header_value(headers, LINEAR_DELIVERY_HEADER)
+            .ok_or(ValidationError::BadRequest("missing Linear-Delivery"))?;
+        let action =
+            payload_token(payload, &["action"]).unwrap_or_else(|| UNKNOWN_ACTION.to_string());
+        let entity_id = entity_id(payload);
+        Ok(linear_dedup_key(&delivery_id, &action, &entity_id))
+    }
+
+    fn cooldown_key(&self, payload: &Value) -> Option<String> {
+        let team_key = payload_token(payload, &["data", "team", "key"])?;
+        let entity_id = entity_id_for_cooldown(payload)?;
+        Some(linear_cooldown_key(&team_key, &entity_id))
+    }
+}
 
 pub fn validate(secret: &str, headers: &HeaderMap, body: &[u8]) -> Result<(), ValidationError> {
     let signature = header_string(headers, LINEAR_SIGNATURE_HEADER)
@@ -50,6 +120,17 @@ fn header_string(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
+}
+
+fn entity_id(payload: &Value) -> String {
+    entity_id_for_cooldown(payload)
+        .or_else(|| payload_token(payload, &["webhookId"]))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn entity_id_for_cooldown(payload: &Value) -> Option<String> {
+    payload_token(payload, &["data", "id"])
+        .or_else(|| payload_token(payload, &["data", "identifier"]))
 }
 
 #[cfg(test)]
@@ -150,5 +231,31 @@ mod tests {
                 "failed for linear type {linear_type}"
             );
         }
+    }
+
+    #[test]
+    fn builds_dedup_key_from_delivery_action_and_entity() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            LINEAR_DELIVERY_HEADER,
+            HeaderValue::from_static("delivery-2"),
+        );
+        let payload = json!({"action":"create","data":{"id":"issue-42"}});
+
+        let key = HANDLER
+            .dedup_key(&headers, &payload)
+            .expect("linear dedup key");
+        assert_eq!(key, "linear:delivery-2:create:issue-42");
+    }
+
+    #[test]
+    fn builds_cooldown_key_from_team_and_entity() {
+        let payload = json!({
+            "data":{"team":{"key":"ENG"},"id":"issue-42"}
+        });
+        assert_eq!(
+            HANDLER.cooldown_key(&payload).as_deref(),
+            Some("cooldown-linear-ENG-issue-42")
+        );
     }
 }

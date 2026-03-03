@@ -35,7 +35,7 @@ Ask:
 Ask:
 - **Create mode?** Create/update via `gh` manifest flow (recommended) or manual UI?
 - **GitHub App owner?** Personal account or organization (where the app will live)
-- **GitHub App name?** e.g. `openclaw-coder` (will become `name[bot]` identity)
+- **GitHub App name?** e.g. `openclaw-agent` (will become `name[bot]` identity)
 - **Homepage URL?** e.g. docs/project URL
 - **Webhook URL?** Default: `{public-relay-base-url}/hooks/github-pr`
 - **Manifest redirect URL?** (CLI flow only) Default: `{public-relay-base-url}/auth/github/manifest`
@@ -64,7 +64,7 @@ Ask:
 Ask:
 - **OpenClaw already running?** If yes, collect gateway URL and hooks token. If no, note that OpenClaw setup is a prerequisite.
 - **Agent ID** — confirm default or customize:
-  - Default: `coder` (single agent handles both GitHub and Linear)
+  - Default: `agent` (single agent handles both GitHub and Linear)
 
 ## Phase 6: Secrets
 
@@ -140,5 +140,5 @@ Setup checklist:
   - Tailscale Funnel for ingress
   - Single public relay host and single ingress service (`webhook` on one port)
   - No GitHub OAuth callback URL unless explicitly required
-  - Default agent ID (`coder`)
+  - Default agent ID (`agent`)
   - Target directory: `./hooks/`

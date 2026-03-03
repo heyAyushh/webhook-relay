@@ -20,7 +20,7 @@
 - `skills/`: operational skills and runbooks.
   - `kafka-kraft-firecracker/`: deploy single-node Kafka KRaft in a Firecracker VM.
 - `references/`: technical guides (boot, hooks, sanitization, release publishing, Tailscale).
-- `memory/coder-tasks.md`: orchestrator shared state board.
+- `memory/agent-tasks.md`: orchestrator shared state board.
 
 ## Build, Test, and Dev Commands
 

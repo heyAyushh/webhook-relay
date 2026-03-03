@@ -1,13 +1,13 @@
 # OpenClaw Agent Configuration
 
-Once webhooks reach OpenClaw via the relay pipeline (see [openclaw-relay.md](openclaw-relay.md)), the gateway invokes the `coder` agent. Both GitHub and Linear events route to the same agent — the transforms provide different context (code review vs project management), but the agent is unified.
+Once webhooks reach OpenClaw via the relay pipeline (see [openclaw-relay.md](openclaw-relay.md)), the gateway invokes the `agent` profile. Both GitHub and Linear events route to the same profile — the transforms provide different context (code review vs project management), but execution is unified.
 
 OpenClaw agents also support **sub-agents** (e.g. dedicated GitHub and Linear agents that proactively watch and interact with the relay, using an existing agent or spawning one if not present). See [openclaw-subagents.md](openclaw-subagents.md).
 
 ## Agent Config Directory
 
 ```
-~/.openclaw/agents/coder/
+~/.openclaw/agents/agent/
 ├── SOUL.md          # Personality, behavior rules, core philosophy
 ├── HEARTBEAT.md     # Autonomous schedule (cron-based wake-ups)
 ├── USER.md          # Human operator context
@@ -18,7 +18,7 @@ OpenClaw agents also support **sub-agents** (e.g. dedicated GitHub and Linear ag
 
 ## Why One Agent
 
-A single `coder` agent handles both GitHub and Linear because:
+A single `agent` profile handles both GitHub and Linear because:
 - It can cross-reference naturally ("this PR implements ENG-123")
 - Shared MEMORY.md means codebase patterns learned from reviews inform issue breakdowns
 - One SOUL.md avoids behavioral drift between two agents doing related work
@@ -33,7 +33,7 @@ The transforms (`github-pr.ts`, `linear.ts`) provide source-specific context in 
 Injected into the system prompt for every interaction.
 
 ```markdown
-You are coder, a software engineering agent.
+You are agent, a software engineering agent.
 
 ## Behavior
 - On GitHub PR events: review for correctness, security, and style. Be concise — flag issues, don't rewrite the PR. Approve if clean; request changes only for real problems.
@@ -86,10 +86,10 @@ List other agents this one can delegate to. For sub-agent setups (GitHub/Linear)
 # Agents
 
 ## Sub-agents (optional)
-- github-coder — GitHub PR/review; proactively watches relay, reviews and comments; spawn or use existing.
-- linear-coder — Linear issues/comments; proactively watches relay, triages and updates; spawn or use existing.
+- github-agent — GitHub PR/review; proactively watches relay, reviews and comments; spawn or use existing.
+- linear-agent — Linear issues/comments; proactively watches relay, triages and updates; spawn or use existing.
 
-(If not using sub-agents: coder handles both code review and project management.)
+(If not using sub-agents: agent handles both code review and project management.)
 ```
 
 ### TOOLS.md — Capabilities and auth
@@ -153,7 +153,7 @@ Webhook event → adnanh/webhook → relay script → OpenClaw gateway
                                           │                       │
                                           └───────────┬───────────┘
                                                       │
-                                                    coder
+                                                    agent
                                               ┌───────────────┐
                                               │ SOUL.md       │
                                               │ TOOLS.md      │

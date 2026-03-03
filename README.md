@@ -1,23 +1,42 @@
-# OpenClaw events ping pong 
+# hook - 🏓 serve. relay. smash.
 
 <p align="center">
-  <img src="assets/banner.jpg" alt="OpenClaw events ping pong banner" />
+  <img src="assets/banner.jpg" alt="hook banner" />
 </p>
 
 > Warning
 > This project is experimental. APIs, payload shapes, and runtime behavior may change without notice.
 > Breaking changes can happen between releases.
 
-Webhooks -> Relay -> Kafka -> OpenClaw
-
-1. `webhook-relay` (public VM): validates webhook auth and publishes normalized envelopes to AutoMQ/Kafka.
-2. `kafka-openclaw-hook` (local, outbound only): consumes `webhooks.*`, forwards to OpenClaw `/hooks/coder`.
-3. Orchestrator session (`agent:orchestrator`): receives all events and coordinates worker subagents.
+Serve (webhook-relay) — validates auth, publishes normalized envelopes to Kafka.
+Relay (Kafka/AutoMQ) — buffers and distributes events across topics.
+Smash (kafka-openclaw-hook) — forwards webhooks.* to OpenClaw, where agent:orchestrator takes over.
 
 ## Architecture
 
-```text
-internet -> nginx:443 -> webhook-relay -> AutoMQ (mTLS) -> kafka-openclaw-hook -> OpenClaw /hooks/coder
+```mermaid
+flowchart LR
+    GH[GitHub] -->|webhook| N
+    LN[Linear] -->|webhook| N
+    OT[Other Source] -->|webhook| N
+
+    subgraph Serve["Serve — webhook-relay"]
+        N[nginx :443] --> R[relay\nauth · dedup · sanitize]
+    end
+
+    R -->|envelope| K
+
+    subgraph Relay["Relay — AutoMQ/Kafka"]
+        K[(webhooks.<source>\nwebhooks.dlq)]
+    end
+
+    K -->|consume| C
+
+    subgraph Smash["Smash — kafka-openclaw-hook"]
+        C[consumer\nretry · DLQ]
+    end
+
+    C -->|POST /hooks/agent| OC[OpenClaw\nagent:orchestrator]
 ```
 
 ## Repository Layout
@@ -32,7 +51,7 @@ internet -> nginx:443 -> webhook-relay -> AutoMQ (mTLS) -> kafka-openclaw-hook -
 - `docker-compose.dev.yml`: relay dev override profile (proxy trust defaults)
 - `scripts/gen-certs.sh`: mTLS cert generation (CA, relay cert, consumer cert)
 - `systemd/`: service units
-- `memory/coder-tasks.md`: orchestrator task board
+- `memory/agent-tasks.md`: orchestrator task board
 
 ## Component Docs and Skills
 
@@ -46,26 +65,30 @@ internet -> nginx:443 -> webhook-relay -> AutoMQ (mTLS) -> kafka-openclaw-hook -
 
 ### `POST /webhook/{source}`
 
-Supported `source` values:
+Built-in `source` handlers (examples):
 
 - `github`
 - `linear`
+- `example`
+
+Other sources can be added by implementing a handler in `src/sources/*` and registering it in `src/sources/mod.rs`.
 
 Behavior:
 
-- verifies source auth (`X-Hub-Signature-256`, `Linear-Signature`)
-- enforces Linear replay window via `webhookTimestamp`
+- validates source auth via the selected source handler
+- runs optional source-specific payload validation (example: Linear timestamp window)
 - parses JSON payload
 - derives `event_type`
 - applies delivery dedup + per-entity cooldown
 - preserves full payload and adds sanitizer risk metadata (`_sanitized`, `_flags`) before publish
-- publishes envelope to topic `webhooks.{source}` asynchronously
+- publishes envelope to topic `<RELAY_SOURCE_TOPIC_PREFIX>.{source}` asynchronously
 - returns `200` fast when accepted
 
 Event compatibility:
 
 - GitHub: any `X-GitHub-Event` is accepted; `action` is appended when present.
 - Linear: any `type` is accepted; if `type` is missing, `Linear-Event` header is used; `action` is appended when present.
+- Example: `X-Example-Event` (or payload `event_type` / `type`) with optional `action`.
 
 Compatibility references:
 
@@ -77,6 +100,7 @@ Compatibility tests:
 
 - `src/sources/github.rs` -> `accepts_all_documented_github_app_events`
 - `src/sources/linear.rs` -> `accepts_all_documented_linear_webhook_types`
+- `src/sources/example.rs` -> `builds_dedup_key_from_delivery_action_and_entity`
 
 Other endpoints:
 
@@ -120,14 +144,22 @@ cp .env.default .env
 Required values to set at minimum:
 
 - `KAFKA_BROKERS`
-- `HMAC_SECRET_GITHUB`
-- `HMAC_SECRET_LINEAR`
+- `RELAY_ENABLED_SOURCES`
 - `OPENCLAW_WEBHOOK_TOKEN`
+
+For built-in example handlers:
+
+- set `HMAC_SECRET_GITHUB` if `github` is enabled
+- set `HMAC_SECRET_LINEAR` if `linear` is enabled
+- set `HMAC_SECRET_EXAMPLE` if `example` is enabled
 
 Useful optional relay controls:
 
 - `KAFKA_SECURITY_PROTOCOL` (default `ssl`; allowed: `ssl`, `plaintext`)
 - `KAFKA_ALLOW_PLAINTEXT` (default `false`; must be `true` to use `plaintext`)
+- `RELAY_ENABLED_SOURCES` (default `github,linear`)
+- `RELAY_SOURCE_TOPIC_PREFIX` (default `webhooks`)
+- `RELAY_SOURCE_TOPICS` (optional explicit topic list; must include one topic per enabled source, e.g. `custom.github,custom.linear`)
 - `RUST_LOG` (default `info`; set to `debug` for verbose ingress->Kafka->consumer->OpenClaw trace logs)
 - `RELAY_DEDUP_TTL_SECONDS` (default `604800`)
 - `RELAY_COOLDOWN_SECONDS` (default `30`)
@@ -142,11 +174,23 @@ Security note:
 Useful optional consumer controls:
 
 Agent routing (`agentId`, `sessionKey`, `model`, `deliver`, `channel`, etc.)
-is configured in OpenClaw gateway `hooks.mappings` for the `coder` mapped hook,
+is configured in OpenClaw gateway `hooks.mappings` for the `agent` mapped hook,
 not in the consumer. See `openclaw config get hooks.mappings`.
 - `RUST_LOG` (use `debug` to include consumed Kafka payloads and OpenClaw request/response traces)
 - `OPENCLAW_MESSAGE_MAX_BYTES` (default `4000`)
 - `OPENCLAW_HTTP_TIMEOUT_SECONDS` (default `20`)
+
+## Add A Source
+
+GitHub and Linear are built-in examples, not the architecture limit.
+
+To add a new source:
+
+1. Create `src/sources/<your_source>.rs` implementing `SourceHandler`.
+2. Register the handler in `src/sources/mod.rs` (`SOURCE_HANDLERS`).
+3. Add the source to `RELAY_ENABLED_SOURCES`.
+4. Ensure the auth secret/env needed by your handler is configured.
+5. Add the source topic to consumer `KAFKA_TOPICS` (or rely on your topic pattern).
 
 ## Build and Test
 
@@ -306,11 +350,11 @@ sudo systemctl enable --now kafka-openclaw-hook
 
 Consumer forwards all events to the same session:
 
-- `agentId = coder`
-- `sessionKey = coder:orchestrator`
+- `agentId = agent`
+- `sessionKey = agent:orchestrator`
 - `channel = telegram`
 - `to = <configured-in-openclaw-hook-mapping>`
 
 Task board file:
 
-- `memory/coder-tasks.md`
+- `memory/agent-tasks.md`

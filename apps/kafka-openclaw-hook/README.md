@@ -6,7 +6,7 @@ Outbound-only Rust consumer that reads webhook envelopes from Kafka/AutoMQ and f
 
 - Subscribe to configured `webhooks.*` topics.
 - Deserialize `relay_core::model::WebhookEnvelope`.
-- Forward to OpenClaw mapped hook `/hooks/coder` with retry/backoff.
+- Forward to OpenClaw mapped hook `/hooks/agent` with retry/backoff.
 - Publish exhausted failures to DLQ topic.
 - Commit Kafka offset after processing path completes.
 
@@ -32,7 +32,7 @@ Key optional env vars:
 
 - `RUST_LOG` (default `info`; set to `debug` for verbose consume->forward trace logs)
 - `KAFKA_GROUP_ID` (default: `kafka-openclaw-hook`)
-- `KAFKA_TOPICS` (default: `webhooks.github,webhooks.linear`)
+- `KAFKA_TOPICS` (default examples: `webhooks.github,webhooks.linear`; set this to match your enabled sources)
 - `KAFKA_DLQ_TOPIC` (default: `webhooks.dlq`)
 - `CONSUMER_MAX_RETRIES` (default: `5`)
 - `CONSUMER_BACKOFF_BASE_SECONDS` (default: `1`)

@@ -1,10 +1,59 @@
-use crate::sources::ValidationError;
+use crate::config::Config;
+use crate::sources::{SourceHandler, ValidationError, header_value, payload_token};
 use axum::http::HeaderMap;
+use relay_core::keys::{github_cooldown_key, github_dedup_key};
 use relay_core::signatures::verify_github_signature;
 use serde_json::Value;
 
 const GITHUB_SIGNATURE_HEADER: &str = "X-Hub-Signature-256";
 const GITHUB_EVENT_HEADER: &str = "X-GitHub-Event";
+const GITHUB_DELIVERY_HEADER: &str = "X-GitHub-Delivery";
+const UNKNOWN_ACTION: &str = "unknown";
+const GITHUB_SOURCE_NAME: &str = "github";
+const MISSING_GITHUB_SECRET_MESSAGE: &str = "missing github secret";
+
+#[derive(Debug, Default)]
+pub struct GithubSourceHandler;
+
+pub static HANDLER: GithubSourceHandler = GithubSourceHandler;
+
+impl SourceHandler for GithubSourceHandler {
+    fn source_name(&self) -> &'static str {
+        GITHUB_SOURCE_NAME
+    }
+
+    fn validate_request(
+        &self,
+        config: &Config,
+        headers: &HeaderMap,
+        body: &[u8],
+    ) -> Result<(), ValidationError> {
+        let secret = config
+            .hmac_secret_github
+            .as_deref()
+            .ok_or(ValidationError::Unauthorized(MISSING_GITHUB_SECRET_MESSAGE))?;
+        validate(secret, headers, body)
+    }
+
+    fn event_type(&self, headers: &HeaderMap, payload: &Value) -> Result<String, ValidationError> {
+        event_type(headers, payload)
+    }
+
+    fn dedup_key(&self, headers: &HeaderMap, payload: &Value) -> Result<String, ValidationError> {
+        let delivery_id = header_value(headers, GITHUB_DELIVERY_HEADER)
+            .ok_or(ValidationError::BadRequest("missing X-GitHub-Delivery"))?;
+        let action =
+            payload_token(payload, &["action"]).unwrap_or_else(|| UNKNOWN_ACTION.to_string());
+        let entity_id = entity_id(payload);
+        Ok(github_dedup_key(&delivery_id, &action, &entity_id))
+    }
+
+    fn cooldown_key(&self, payload: &Value) -> Option<String> {
+        let repo = payload_token(payload, &["repository", "full_name"])?;
+        let entity_id = entity_id_for_cooldown(payload)?;
+        Some(github_cooldown_key(&repo, &entity_id))
+    }
+}
 
 pub fn validate(secret: &str, headers: &HeaderMap, body: &[u8]) -> Result<(), ValidationError> {
     let signature = header_string(headers, GITHUB_SIGNATURE_HEADER)
@@ -41,6 +90,20 @@ fn header_string(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
+}
+
+fn entity_id(payload: &Value) -> String {
+    entity_id_for_cooldown(payload)
+        .or_else(|| payload_token(payload, &["comment", "id"]))
+        .or_else(|| payload_token(payload, &["review", "id"]))
+        .or_else(|| payload_token(payload, &["repository", "id"]))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn entity_id_for_cooldown(payload: &Value) -> Option<String> {
+    payload_token(payload, &["pull_request", "number"])
+        .or_else(|| payload_token(payload, &["issue", "number"]))
+        .or_else(|| payload_token(payload, &["number"]))
 }
 
 #[cfg(test)]
@@ -200,5 +263,32 @@ mod tests {
                 "failed for github event {event}"
             );
         }
+    }
+
+    #[test]
+    fn builds_dedup_key_from_delivery_action_and_entity() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            GITHUB_DELIVERY_HEADER,
+            HeaderValue::from_static("delivery-1"),
+        );
+        let payload = json!({"action":"opened","pull_request":{"number":42}});
+
+        let key = HANDLER
+            .dedup_key(&headers, &payload)
+            .expect("github dedup key");
+        assert_eq!(key, "github:delivery-1:opened:42");
+    }
+
+    #[test]
+    fn builds_cooldown_key_from_repo_and_entity() {
+        let payload = json!({
+            "repository":{"full_name":"org/repo"},
+            "pull_request":{"number":99}
+        });
+        assert_eq!(
+            HANDLER.cooldown_key(&payload).as_deref(),
+            Some("cooldown-github-org-repo-99")
+        );
     }
 }

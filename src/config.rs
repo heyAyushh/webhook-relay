@@ -5,6 +5,9 @@ use std::env;
 #[derive(Debug, Clone)]
 pub struct Config {
     pub bind_addr: String,
+    pub enabled_sources: Vec<String>,
+    pub source_topic_prefix: String,
+    pub relay_source_topics: Vec<String>,
     pub kafka_brokers: String,
     pub kafka_security_protocol: String,
     pub kafka_allow_plaintext: bool,
@@ -15,8 +18,9 @@ pub struct Config {
     pub kafka_auto_create_topics: bool,
     pub kafka_topic_partitions: i32,
     pub kafka_topic_replication_factor: i32,
-    pub hmac_secret_github: String,
-    pub hmac_secret_linear: String,
+    pub hmac_secret_github: Option<String>,
+    pub hmac_secret_linear: Option<String>,
+    pub hmac_secret_example: Option<String>,
     pub max_payload_bytes: usize,
     pub ip_limit_per_minute: u32,
     pub source_limit_per_minute: u32,
@@ -34,8 +38,58 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Result<Self> {
+        let enabled_sources = env_csv_lower("RELAY_ENABLED_SOURCES", "github,linear")?;
+        if enabled_sources.is_empty() {
+            return Err(anyhow!("RELAY_ENABLED_SOURCES cannot be empty"));
+        }
+
+        let source_topic_prefix = env::var("RELAY_SOURCE_TOPIC_PREFIX")
+            .unwrap_or_else(|_| "webhooks".to_string())
+            .trim()
+            .to_string();
+        if source_topic_prefix.is_empty() {
+            return Err(anyhow!(
+                "RELAY_SOURCE_TOPIC_PREFIX cannot be empty when provided"
+            ));
+        }
+
+        let relay_source_topics = match env::var("RELAY_SOURCE_TOPICS")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            Some(raw_topics) => {
+                let parsed_topics = parse_csv(&raw_topics);
+                if parsed_topics.is_empty() {
+                    return Err(anyhow!("RELAY_SOURCE_TOPICS cannot be empty when provided"));
+                }
+                for source in &enabled_sources {
+                    if !parsed_topics
+                        .iter()
+                        .any(|topic| topic_matches_source(topic, source))
+                    {
+                        return Err(anyhow!(
+                            "RELAY_SOURCE_TOPICS must include a topic for enabled source {source}"
+                        ));
+                    }
+                }
+                parsed_topics
+            }
+            None => enabled_sources
+                .iter()
+                .map(|source| format!("{source_topic_prefix}.{source}"))
+                .collect(),
+        };
+
+        let github_enabled = contains_source(&enabled_sources, "github");
+        let linear_enabled = contains_source(&enabled_sources, "linear");
+        let example_enabled = contains_source(&enabled_sources, "example");
+
         let config = Self {
             bind_addr: env::var("RELAY_BIND").unwrap_or_else(|_| "0.0.0.0:8080".to_string()),
+            enabled_sources,
+            source_topic_prefix,
+            relay_source_topics,
             kafka_brokers: required_env("KAFKA_BROKERS")?,
             kafka_security_protocol: env::var("KAFKA_SECURITY_PROTOCOL")
                 .unwrap_or_else(|_| "ssl".to_string())
@@ -50,8 +104,9 @@ impl Config {
             kafka_auto_create_topics: env_bool("KAFKA_AUTO_CREATE_TOPICS", true),
             kafka_topic_partitions: env_i32("KAFKA_TOPIC_PARTITIONS", 3)?,
             kafka_topic_replication_factor: env_i32("KAFKA_TOPIC_REPLICATION_FACTOR", 1)?,
-            hmac_secret_github: required_env("HMAC_SECRET_GITHUB")?,
-            hmac_secret_linear: required_env("HMAC_SECRET_LINEAR")?,
+            hmac_secret_github: conditional_env("HMAC_SECRET_GITHUB", github_enabled)?,
+            hmac_secret_linear: conditional_env("HMAC_SECRET_LINEAR", linear_enabled)?,
+            hmac_secret_example: conditional_env("HMAC_SECRET_EXAMPLE", example_enabled)?,
             max_payload_bytes: env_usize("RELAY_MAX_PAYLOAD_BYTES", 1_048_576)?,
             ip_limit_per_minute: env_u32("RELAY_IP_RATE_PER_MINUTE", 100)?,
             source_limit_per_minute: env_u32("RELAY_SOURCE_RATE_PER_MINUTE", 500)?,
@@ -136,6 +191,26 @@ impl Config {
 
         Ok(config)
     }
+
+    pub fn is_source_enabled(&self, source: &str) -> bool {
+        let normalized = source.trim().to_ascii_lowercase();
+        self.enabled_sources
+            .iter()
+            .any(|candidate| candidate == &normalized)
+    }
+
+    pub fn source_topic_name(&self, source: &str) -> String {
+        let normalized_source = source.trim().to_ascii_lowercase();
+        if let Some(topic) = self
+            .relay_source_topics
+            .iter()
+            .find(|topic| topic_matches_source(topic, &normalized_source))
+        {
+            return topic.clone();
+        }
+
+        format!("{}.{}", self.source_topic_prefix, normalized_source)
+    }
 }
 
 fn required_env(name: &str) -> Result<String> {
@@ -144,6 +219,46 @@ fn required_env(name: &str) -> Result<String> {
         return Err(anyhow!("required env var {name} cannot be empty"));
     }
     Ok(value)
+}
+
+fn conditional_env(name: &str, required: bool) -> Result<Option<String>> {
+    if required {
+        return required_env(name).map(Some);
+    }
+
+    Ok(env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty()))
+}
+
+fn env_csv_lower(name: &str, default: &str) -> Result<Vec<String>> {
+    let raw = env::var(name).unwrap_or_else(|_| default.to_string());
+    let values = parse_csv(&raw)
+        .into_iter()
+        .map(|value| value.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        return Err(anyhow!("{name} cannot be empty"));
+    }
+    Ok(values)
+}
+
+fn parse_csv(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn contains_source(values: &[String], source: &str) -> bool {
+    values.iter().any(|value| value == source)
+}
+
+fn topic_matches_source(topic: &str, source: &str) -> bool {
+    let normalized_topic = topic.trim().to_ascii_lowercase();
+    normalized_topic == source || normalized_topic.ends_with(&format!(".{source}"))
 }
 
 fn env_u32(name: &str, default: u32) -> Result<u32> {
@@ -244,6 +359,9 @@ mod tests {
 
     const CONFIG_KEYS: &[&str] = &[
         "RELAY_BIND",
+        "RELAY_ENABLED_SOURCES",
+        "RELAY_SOURCE_TOPIC_PREFIX",
+        "RELAY_SOURCE_TOPICS",
         "KAFKA_BROKERS",
         "KAFKA_SECURITY_PROTOCOL",
         "KAFKA_ALLOW_PLAINTEXT",
@@ -256,6 +374,7 @@ mod tests {
         "KAFKA_TOPIC_REPLICATION_FACTOR",
         "HMAC_SECRET_GITHUB",
         "HMAC_SECRET_LINEAR",
+        "HMAC_SECRET_EXAMPLE",
         "RELAY_MAX_PAYLOAD_BYTES",
         "RELAY_IP_RATE_PER_MINUTE",
         "RELAY_SOURCE_RATE_PER_MINUTE",
@@ -356,6 +475,9 @@ mod tests {
             let config = Config::from_env().expect("config should accept ssl with tls vars");
             assert_eq!(config.kafka_security_protocol, "ssl");
             assert!(!config.kafka_allow_plaintext);
+            assert_eq!(config.hmac_secret_github.as_deref(), Some("github-secret"));
+            assert_eq!(config.hmac_secret_linear.as_deref(), Some("linear-secret"));
+            assert_eq!(config.hmac_secret_example, None);
         });
     }
 
@@ -406,6 +528,63 @@ mod tests {
             assert!(error.to_string().contains(
                 "unsupported KAFKA_SECURITY_PROTOCOL=sasl_ssl; expected ssl or plaintext"
             ));
+        });
+    }
+
+    #[test]
+    fn allows_disabling_builtin_sources_without_their_secrets() {
+        let env_vars = [
+            ("KAFKA_BROKERS", "broker:9093"),
+            ("RELAY_ENABLED_SOURCES", "github"),
+            ("HMAC_SECRET_GITHUB", "github-secret"),
+            ("KAFKA_SECURITY_PROTOCOL", "plaintext"),
+            ("KAFKA_ALLOW_PLAINTEXT", "true"),
+        ];
+        with_env(&env_vars, || {
+            let config = Config::from_env().expect("config should load for github-only mode");
+            assert!(config.is_source_enabled("github"));
+            assert!(!config.is_source_enabled("linear"));
+            assert_eq!(config.hmac_secret_linear, None);
+            assert_eq!(config.relay_source_topics, vec!["webhooks.github"]);
+        });
+    }
+
+    #[test]
+    fn accepts_explicit_source_topics_override() {
+        let env_vars = [
+            ("KAFKA_BROKERS", "broker:9093"),
+            ("HMAC_SECRET_GITHUB", "github-secret"),
+            ("HMAC_SECRET_LINEAR", "linear-secret"),
+            ("RELAY_SOURCE_TOPICS", "custom.github,custom.linear"),
+            ("KAFKA_SECURITY_PROTOCOL", "plaintext"),
+            ("KAFKA_ALLOW_PLAINTEXT", "true"),
+        ];
+        with_env(&env_vars, || {
+            let config = Config::from_env().expect("config should accept explicit source topics");
+            assert_eq!(
+                config.relay_source_topics,
+                vec!["custom.github", "custom.linear"]
+            );
+            assert_eq!(config.source_topic_name("github"), "custom.github");
+            assert_eq!(config.source_topic_name("linear"), "custom.linear");
+        });
+    }
+
+    #[test]
+    fn requires_example_secret_when_example_source_is_enabled() {
+        let env_vars = [
+            ("KAFKA_BROKERS", "broker:9093"),
+            ("RELAY_ENABLED_SOURCES", "example"),
+            ("KAFKA_SECURITY_PROTOCOL", "plaintext"),
+            ("KAFKA_ALLOW_PLAINTEXT", "true"),
+        ];
+        with_env(&env_vars, || {
+            let error = Config::from_env().expect_err("example source should require secret");
+            assert!(
+                error
+                    .to_string()
+                    .contains("missing required env var: HMAC_SECRET_EXAMPLE")
+            );
         });
     }
 }

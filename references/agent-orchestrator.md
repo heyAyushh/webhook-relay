@@ -1,10 +1,10 @@
-# Coder Orchestrator Contract
+# Agent Orchestrator Contract
 
-Session key: `coder:orchestrator`
+Session key: `agent:orchestrator`
 
 ## Responsibilities
 
-1. Read `memory/coder-tasks.md`.
+1. Read `memory/agent-tasks.md`.
 2. Decide inline handling vs worker spawn.
 3. Spawn worker sessions with event context and task board snapshot.
 4. Track workers with `subagents(action=list)`.

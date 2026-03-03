@@ -36,7 +36,9 @@ static COMPILED_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
 });
 
 pub fn sanitize_payload(source: &str, payload: &Value) -> Result<Value, String> {
-    ensure_supported_source(source)?;
+    if source.trim().is_empty() {
+        return Err("source cannot be empty".to_string());
+    }
 
     let all_hits = find_all_hits(payload);
     let mut sanitized = payload.clone();
@@ -55,13 +57,6 @@ pub fn sanitize_payload(source: &str, payload: &Value) -> Result<Value, String> 
     }
 
     Ok(sanitized)
-}
-
-fn ensure_supported_source(source: &str) -> Result<(), String> {
-    match source {
-        "github" | "linear" => Ok(()),
-        _ => Err(format!("unsupported source: {source}")),
-    }
 }
 
 fn find_all_hits(payload: &Value) -> Vec<(String, Vec<String>)> {
@@ -332,8 +327,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_source() {
+    fn accepts_unknown_source_name() {
         let payload = json!({"k":"v"});
-        assert!(sanitize_payload("unknown", &payload).is_err());
+        assert!(sanitize_payload("custom-source", &payload).is_ok());
+    }
+
+    #[test]
+    fn rejects_empty_source_name() {
+        let payload = json!({"k":"v"});
+        assert!(sanitize_payload("", &payload).is_err());
     }
 }
