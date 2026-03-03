@@ -7,9 +7,10 @@ use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::types::RDKafkaErrorCode;
 use rdkafka::util::Timeout;
 use relay_core::model::{Source, WebhookEnvelope};
+use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, sleep};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone)]
 pub struct PublishJob {
@@ -44,16 +45,37 @@ impl KafkaPublisher {
     pub async fn publish(&self, job: &PublishJob) -> Result<()> {
         let payload = serde_json::to_string(&job.envelope).context("serialize webhook envelope")?;
         let key = job.envelope.id.as_str();
+        debug!(
+            topic = job.topic.as_str(),
+            event_id = job.envelope.id.as_str(),
+            kafka_payload = %to_json_string(&job.envelope),
+            "prepared kafka publish message"
+        );
 
         let mut attempt = 0u32;
         loop {
             let record = FutureRecord::to(&job.topic).key(key).payload(&payload);
+            debug!(
+                topic = job.topic.as_str(),
+                event_id = job.envelope.id.as_str(),
+                attempt = attempt + 1,
+                "publishing webhook envelope to kafka"
+            );
             match self
                 .producer
                 .send(record, Timeout::After(Duration::from_secs(5)))
                 .await
             {
-                Ok(_) => return Ok(()),
+                Ok(delivery) => {
+                    info!(
+                        topic = job.topic.as_str(),
+                        event_id = job.envelope.id.as_str(),
+                        partition = delivery.partition,
+                        offset = delivery.offset,
+                        "published webhook envelope to kafka"
+                    );
+                    return Ok(());
+                }
                 Err((error, _message)) => {
                     attempt = attempt.saturating_add(1);
                     if attempt >= self.max_retries {
@@ -153,6 +175,11 @@ pub fn retry_backoff_ms(base_ms: u64, max_ms: u64, attempt_index: u32) -> u64 {
     let exponent = attempt_index.min(31);
     let scaled = base_ms.saturating_mul(1u64 << exponent);
     scaled.min(max_ms)
+}
+
+fn to_json_string<T: Serialize>(value: &T) -> String {
+    serde_json::to_string(value)
+        .unwrap_or_else(|error| format!("{{\"serialization_error\":\"{}\"}}", error))
 }
 
 fn base_client_config(config: &Config) -> ClientConfig {

@@ -11,6 +11,7 @@ use relay_core::keys::{
 use relay_core::model::Source;
 use relay_core::sanitize::sanitize_payload;
 use relay_core::timestamps::verify_linear_timestamp_window;
+use serde::Serialize;
 use serde_json::{Value, json};
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -21,7 +22,7 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
 use tower_governor::GovernorLayer;
 use tower_governor::governor::GovernorConfigBuilder;
-use tracing::{info, warn};
+use tracing::{Level, debug, info, warn};
 use tracing_subscriber::EnvFilter;
 use webhook_relay::client_ip::TrustedClientIpKeyExtractor;
 use webhook_relay::config::Config;
@@ -41,6 +42,8 @@ struct AppState {
     idempotency_store: IdempotencyStore,
     publish_worker_alive: Arc<AtomicBool>,
 }
+
+const MAX_RAW_BODY_PREVIEW_CHARS: usize = 4_096;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -145,11 +148,22 @@ async fn webhook_handler(
         Ok(source) => source,
         Err(_) => return (StatusCode::NOT_FOUND, Json(json!({"error":"not found"}))),
     };
+    info!(
+        source = source.as_str(),
+        remote = %remote_addr.ip(),
+        body_bytes = body.len(),
+        "webhook request received"
+    );
 
     if !state
         .source_rate_limiter
         .allow(source.as_str(), epoch_seconds())
     {
+        warn!(
+            source = source.as_str(),
+            remote = %remote_addr.ip(),
+            "source rate limit exceeded"
+        );
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(json!({"error":"source rate limit exceeded"})),
@@ -179,12 +193,26 @@ async fn webhook_handler(
     let payload: Value = match serde_json::from_slice(&body) {
         Ok(payload) => payload,
         Err(_error) => {
+            if tracing::enabled!(Level::DEBUG) {
+                debug!(
+                    source = source.as_str(),
+                    remote = %remote_addr.ip(),
+                    raw_body = %body_utf8_preview(&body, MAX_RAW_BODY_PREVIEW_CHARS),
+                    "failed to parse webhook json payload"
+                );
+            }
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error":"invalid json payload"})),
             );
         }
     };
+    debug!(
+        source = source.as_str(),
+        remote = %remote_addr.ip(),
+        webhook_payload = %payload,
+        "parsed webhook payload"
+    );
 
     if source == Source::Linear
         && !verify_linear_timestamp_window(
@@ -216,6 +244,11 @@ async fn webhook_handler(
             );
         }
     };
+    debug!(
+        source = source.as_str(),
+        event_type = event_type.as_str(),
+        "derived webhook event type"
+    );
 
     let dedup_key = match dedup_key_for_source(source, &headers, &payload) {
         Ok(key) => key,
@@ -230,18 +263,34 @@ async fn webhook_handler(
         }
     };
     let cooldown_key = cooldown_key_for_source(source, &payload);
+    debug!(
+        source = source.as_str(),
+        dedup_key = dedup_key.as_str(),
+        cooldown_key = ?cooldown_key,
+        "computed idempotency keys"
+    );
     match state
         .idempotency_store
         .check(&dedup_key, cooldown_key.as_deref(), epoch_seconds())
     {
         IdempotencyDecision::Accept => {}
         IdempotencyDecision::Duplicate => {
+            info!(
+                source = source.as_str(),
+                dedup_key = dedup_key.as_str(),
+                "ignored duplicate webhook delivery"
+            );
             return (
                 StatusCode::OK,
                 Json(json!({"status":"ignored","reason":"duplicate"})),
             );
         }
         IdempotencyDecision::Cooldown => {
+            info!(
+                source = source.as_str(),
+                cooldown_key = ?cooldown_key,
+                "ignored webhook due to cooldown"
+            );
             return (
                 StatusCode::OK,
                 Json(json!({"status":"ignored","reason":"cooldown"})),
@@ -264,22 +313,61 @@ async fn webhook_handler(
             );
         }
     };
+    debug!(
+        source = source.as_str(),
+        sanitized_payload = %sanitized_payload,
+        "sanitized webhook payload"
+    );
 
     let envelope = build_envelope(source, event_type, sanitized_payload);
     let topic = source.topic_name().to_string();
+    debug!(
+        source = source.as_str(),
+        topic = topic.as_str(),
+        envelope_json = %to_json_string(&envelope),
+        "prepared kafka publish envelope"
+    );
 
     let event_id = envelope.id.clone();
+    let event_type_for_log = envelope.event_type.clone();
+    let topic_for_log = topic.clone();
     let publish_job = PublishJob { topic, envelope };
     match state.publish_tx.try_send(publish_job) {
-        Ok(()) => (StatusCode::OK, Json(json!({"status":"ok","id": event_id}))),
-        Err(mpsc::error::TrySendError::Full(_)) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error":"publisher queue is full"})),
-        ),
-        Err(mpsc::error::TrySendError::Closed(_)) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error":"publisher unavailable"})),
-        ),
+        Ok(()) => {
+            info!(
+                source = source.as_str(),
+                event_type = event_type_for_log.as_str(),
+                topic = topic_for_log.as_str(),
+                event_id = event_id.as_str(),
+                remote = %remote_addr.ip(),
+                "webhook event accepted and queued for kafka publish"
+            );
+            (StatusCode::OK, Json(json!({"status":"ok","id": event_id})))
+        }
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            warn!(
+                source = source.as_str(),
+                topic = topic_for_log.as_str(),
+                event_id = event_id.as_str(),
+                "failed to enqueue webhook envelope: publisher queue is full"
+            );
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error":"publisher queue is full"})),
+            )
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            warn!(
+                source = source.as_str(),
+                topic = topic_for_log.as_str(),
+                event_id = event_id.as_str(),
+                "failed to enqueue webhook envelope: publisher unavailable"
+            );
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error":"publisher unavailable"})),
+            )
+        }
     }
 }
 
@@ -436,6 +524,31 @@ fn epoch_seconds() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+fn body_utf8_preview(body: &Bytes, max_chars: usize) -> String {
+    let raw = String::from_utf8_lossy(body);
+    if raw.chars().count() <= max_chars {
+        return raw.into_owned();
+    }
+
+    let preview_limit = max_chars.saturating_sub(3);
+    let mut output = String::new();
+    let mut char_count = 0usize;
+    for character in raw.chars() {
+        if char_count >= preview_limit {
+            break;
+        }
+        output.push(character);
+        char_count = char_count.saturating_add(1);
+    }
+    output.push_str("...");
+    output
+}
+
+fn to_json_string<T: Serialize>(value: &T) -> String {
+    serde_json::to_string(value)
+        .unwrap_or_else(|error| format!("{{\"serialization_error\":\"{}\"}}", error))
 }
 
 fn setup_tracing() {

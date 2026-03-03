@@ -30,6 +30,7 @@ Required env vars:
 
 Key optional env vars:
 
+- `RUST_LOG` (default `info`; set to `debug` for verbose consume->forward trace logs)
 - `KAFKA_GROUP_ID` (default: `kafka-openclaw-hook`)
 - `KAFKA_TOPICS` (default: `webhooks.github,webhooks.linear`)
 - `KAFKA_DLQ_TOPIC` (default: `webhooks.dlq`)

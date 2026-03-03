@@ -6,6 +6,7 @@ use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::util::Timeout;
 use relay_core::model::{DlqEnvelope, WebhookEnvelope};
 use std::time::Duration;
+use tracing::{debug, info};
 
 #[derive(Clone)]
 pub struct DlqProducer {
@@ -55,6 +56,14 @@ impl DlqProducer {
 
         let payload = serde_json::to_string(&dlq_payload).context("serialize dlq envelope")?;
         let key = envelope.id.as_str();
+        debug!(
+            topic = self.topic.as_str(),
+            event_id = envelope.id.as_str(),
+            source = envelope.source.as_str(),
+            event_type = envelope.event_type.as_str(),
+            dlq_payload = payload.as_str(),
+            "publishing failed envelope to dlq"
+        );
 
         self.producer
             .send(
@@ -63,6 +72,13 @@ impl DlqProducer {
             )
             .await
             .map_err(|(error, _)| anyhow!("publish dlq message failed: {error}"))?;
+        info!(
+            topic = self.topic.as_str(),
+            event_id = envelope.id.as_str(),
+            source = envelope.source.as_str(),
+            event_type = envelope.event_type.as_str(),
+            "published failed envelope to dlq"
+        );
 
         Ok(())
     }

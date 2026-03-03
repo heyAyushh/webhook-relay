@@ -120,6 +120,7 @@ Useful optional relay controls:
 
 - `KAFKA_SECURITY_PROTOCOL` (default `ssl`; allowed: `ssl`, `plaintext`)
 - `KAFKA_ALLOW_PLAINTEXT` (default `false`; must be `true` to use `plaintext`)
+- `RUST_LOG` (default `info`; set to `debug` for verbose ingress->Kafka->consumer->OpenClaw trace logs)
 - `RELAY_DEDUP_TTL_SECONDS` (default `604800`)
 - `RELAY_COOLDOWN_SECONDS` (default `30`)
 - `RELAY_ENFORCE_LINEAR_TIMESTAMP_WINDOW` (default `true`)
@@ -135,6 +136,7 @@ Useful optional consumer controls:
 Agent routing (`agentId`, `sessionKey`, `model`, `deliver`, `channel`, etc.)
 is configured in OpenClaw gateway `hooks.mappings` for the `coder` mapped hook,
 not in the consumer. See `openclaw config get hooks.mappings`.
+- `RUST_LOG` (use `debug` to include consumed Kafka payloads and OpenClaw request/response traces)
 - `OPENCLAW_MESSAGE_MAX_BYTES` (default `4000`)
 - `OPENCLAW_HTTP_TIMEOUT_SECONDS` (default `20`)
 
