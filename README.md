@@ -15,28 +15,44 @@ Smash (kafka-openclaw-hook) — forwards webhooks.* to OpenClaw, where agent:orc
 ## Architecture
 
 ```mermaid
-flowchart LR
-    GH[GitHub] -->|webhook| N
-    LN[Linear] -->|webhook| N
-    OT[Other Source] -->|webhook| N
+flowchart TB
+    GH([GitHub]):::source
+    LN([Linear]):::source
+    OT([Other]):::source
 
-    subgraph Serve["Serve — webhook-relay"]
-        N[nginx :443] --> R[relay\nauth · dedup · sanitize]
+    subgraph SERVE["Serve — webhook-relay"]
+        N["nginx :443"] --> R["auth · dedup · sanitize"]
     end
 
-    R -->|envelope| K
-
-    subgraph Relay["Relay — AutoMQ/Kafka"]
-        K[(webhooks.<source>\nwebhooks.dlq)]
+    subgraph RELAY["Relay — AutoMQ / Kafka"]
+        direction LR
+        T[(webhooks.*)]:::topic
+        DLQ[(webhooks.dlq)]:::dlq
     end
 
-    K -->|consume| C
-
-    subgraph Smash["Smash — kafka-openclaw-hook"]
-        C[consumer\nretry · DLQ]
+    subgraph SMASH["Smash — apps/kafka-openclaw-hook"]
+        C["consumer"] --> RT["retry · exp backoff"]
     end
 
-    C -->|POST /hooks/agent| OC[OpenClaw\nagent:orchestrator]
+    GH & LN & OT -->|webhook| N
+    R -->|envelope| T
+    T -->|consume| C
+    RT -->|exhausted| DLQ
+    RT -->|POST /hooks/agent| OC
+
+    subgraph OPENCLAW["OpenClaw"]
+        OC["agent:orchestrator"]:::agent
+    end
+
+    classDef source fill:#1e4d8c,stroke:#5ba3ff,color:#ffffff
+    classDef topic  fill:#4a4a4a,stroke:#aaaaaa,color:#ffffff
+    classDef dlq    fill:#990000,stroke:#ff6b6b,color:#ffffff
+    classDef agent  fill:#b85200,stroke:#ffb347,color:#ffffff
+
+    style SERVE    fill:#1e4d8c,stroke:#5ba3ff,color:#ffffff
+    style RELAY    fill:#4a4a4a,stroke:#aaaaaa,color:#ffffff
+    style SMASH    fill:#6b2fa0,stroke:#ce93d8,color:#ffffff
+    style OPENCLAW fill:#b85200,stroke:#ffb347,color:#ffffff
 ```
 
 ## Repository Layout
