@@ -3,20 +3,20 @@ services:
     image: nginx:1.27-alpine
     container_name: relay-nginx
     depends_on:
-      - webhook-relay
+      - hook-serve
     ports:
       - "443:443"
     volumes:
-      - ./deploy/nginx/webhook-relay.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./deploy/nginx/hook-serve.conf:/etc/nginx/conf.d/default.conf:ro
       - ./certs/tls.crt:/etc/nginx/certs/tls.crt:ro
       - ./certs/tls.key:/etc/nginx/certs/tls.key:ro
     restart: unless-stopped
 
-  webhook-relay:
+  hook-serve:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: webhook-relay
+    container_name: hook-serve
     environment:
       RELAY_BIND: "0.0.0.0:8080"
       RELAY_MAX_PAYLOAD_BYTES: "1048576"

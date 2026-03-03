@@ -7,7 +7,7 @@ Wants=local-fs.target
 Type=simple
 User=root
 Group=root
-Environment=FIRECRACKER_REPO_ROOT=/opt/webhook-relay
+Environment=FIRECRACKER_REPO_ROOT=/opt/hook-serve
 EnvironmentFile=-/etc/firecracker/runtime.env
 EnvironmentFile=-/etc/firecracker/kernel-kmsg.env
 ExecStart=/usr/bin/env bash -lc 'exec python3 "${FIRECRACKER_REPO_ROOT}/firecracker/watchdog/kernel-kmsg-capture.py"'

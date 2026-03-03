@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=oneshot
 User=root
 Group=root
-Environment=FIRECRACKER_REPO_ROOT=/opt/webhook-relay
+Environment=FIRECRACKER_REPO_ROOT=/opt/hook-serve
 EnvironmentFile=-/etc/firecracker/runtime.env
 EnvironmentFile=-/etc/firecracker/alerts.env
 EnvironmentFile=-/etc/firecracker/external-blackbox.env

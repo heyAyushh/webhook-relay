@@ -1,11 +1,11 @@
 # Firecracker Runtime Notes
 
-This directory contains the active Firecracker runtime stack for `webhook-relay`.
+This directory contains the active Firecracker runtime stack for `hook-serve`.
 
 ## Layout
 
 - `firecracker-config.template.json`: baseline Firecracker VM config template
-- `webhook-relay.service`: single-VM systemd unit template
+- `hook-serve.service`: single-VM systemd unit template
 - `runtime/*`: jailer launcher, cleanup, inventory, and defaults
 - `systemd/*`: host unit/timer templates and env examples
 - `watchdog/*`: local watchdog, heartbeat, boot/shutdown diagnostics, alert helpers, and external checker scripts
@@ -19,10 +19,10 @@ This directory contains the active Firecracker runtime stack for `webhook-relay`
 Systemd templates are configurable through `/etc/firecracker/runtime.env`:
 
 ```bash
-FIRECRACKER_REPO_ROOT=/opt/webhook-relay
+FIRECRACKER_REPO_ROOT=/opt/hook-serve
 ```
 
-Units default to `/opt/webhook-relay` but can run from any location by changing `FIRECRACKER_REPO_ROOT`.
+Units default to `/opt/hook-serve` but can run from any location by changing `FIRECRACKER_REPO_ROOT`.
 
 ## VM Launch Flow
 
@@ -36,7 +36,7 @@ cargo build --release
 
 ```bash
 scripts/build-firecracker-rootfs.sh \
-  --binary target/release/webhook-relay \
+  --binary target/release/hook-serve \
   --rootfs out/firecracker/rootfs.ext4 \
   --data out/firecracker/data.ext4
 ```
@@ -107,7 +107,7 @@ Env files to copy under `/etc/firecracker/`:
 Quick status:
 
 ```bash
-/opt/webhook-relay/firecracker/watchdog/status.sh
+/opt/hook-serve/firecracker/watchdog/status.sh
 ```
 
 ## External Checkers (Separate Host)

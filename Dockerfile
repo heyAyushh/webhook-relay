@@ -8,7 +8,7 @@ COPY crates ./crates
 COPY src ./src
 COPY apps ./apps
 
-RUN cargo build --release -p webhook-relay
+RUN cargo build --release -p hook-serve
 
 FROM alpine:3.22
 
@@ -16,7 +16,7 @@ RUN addgroup -S relay \
     && adduser -S -G relay relay \
     && apk add --no-cache ca-certificates curl
 
-COPY --from=builder /app/target/release/webhook-relay /usr/local/bin/webhook-relay
+COPY --from=builder /app/target/release/hook-serve /usr/local/bin/hook-serve
 
 USER relay
 
@@ -31,4 +31,4 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD curl -fsS http://127.0.0.1:8080/health || exit 1
 
-ENTRYPOINT ["/usr/local/bin/webhook-relay"]
+ENTRYPOINT ["/usr/local/bin/hook-serve"]

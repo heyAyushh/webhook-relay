@@ -8,7 +8,7 @@ Requires=firecracker-network.service
 Type=simple
 User=root
 Group=root
-Environment=FIRECRACKER_REPO_ROOT=/opt/webhook-relay
+Environment=FIRECRACKER_REPO_ROOT=/opt/hook-serve
 EnvironmentFile=-/etc/firecracker/runtime.env
 EnvironmentFile=/etc/firecracker/%i.env
 ExecStart=/usr/bin/env bash -lc 'exec "${FIRECRACKER_REPO_ROOT}/firecracker/runtime/launch.sh" "%i" "${FIRECRACKER_CONFIG}" "${FIRECRACKER_SOCKET:-}"'

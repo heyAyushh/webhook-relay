@@ -6,13 +6,13 @@
   "drives": [
     {
       "drive_id": "rootfs",
-      "path_on_host": "/opt/webhook-relay/rootfs.ext4",
+      "path_on_host": "/opt/hook-serve/rootfs.ext4",
       "is_root_device": true,
       "is_read_only": true
     },
     {
       "drive_id": "data",
-      "path_on_host": "/opt/webhook-relay/data.ext4",
+      "path_on_host": "/opt/hook-serve/data.ext4",
       "is_root_device": false,
       "is_read_only": false
     }
@@ -30,7 +30,7 @@
     }
   ],
   "logger": {
-    "log_path": "/tmp/firecracker-webhook-relay.log",
+    "log_path": "/tmp/firecracker-hook-serve.log",
     "level": "Info",
     "show_level": true,
     "show_log_origin": true

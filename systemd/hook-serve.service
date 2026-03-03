@@ -1,5 +1,5 @@
 [Unit]
-Description=Webhook Relay (Rust)
+Description=Hook Serve (Rust)
 After=network-online.target
 Wants=network-online.target
 
@@ -7,8 +7,8 @@ Wants=network-online.target
 Type=simple
 User=relay
 Group=relay
-EnvironmentFile=/etc/webhook-relay/relay.env
-ExecStart=/usr/local/bin/webhook-relay
+EnvironmentFile=/etc/hook-serve/relay.env
+ExecStart=/usr/local/bin/hook-serve
 Restart=always
 RestartSec=3
 NoNewPrivileges=true

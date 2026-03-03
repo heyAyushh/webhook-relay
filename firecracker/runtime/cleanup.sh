@@ -37,7 +37,7 @@ resolve_socket_path() {
     kafka)
       printf '%s' "${DEFAULT_VM_SOCKET_DIR}/kafka-fc.sock"
       ;;
-    relay|webhook-relay)
+    relay|hook-serve)
       printf '%s' "${DEFAULT_VM_SOCKET_DIR}/relay-fc.sock"
       ;;
     *)

@@ -1,5 +1,5 @@
 [Unit]
-Description=Webhook Relay Firecracker MicroVM
+Description=Hook Serve Firecracker MicroVM
 After=network-online.target firecracker-network.service
 Wants=network-online.target firecracker-network.service
 Requires=firecracker-network.service
@@ -8,7 +8,7 @@ Requires=firecracker-network.service
 Type=simple
 User=root
 Group=root
-Environment=FIRECRACKER_REPO_ROOT=/opt/webhook-relay
+Environment=FIRECRACKER_REPO_ROOT=/opt/hook-serve
 EnvironmentFile=-/etc/firecracker/runtime.env
 EnvironmentFile=/etc/firecracker/relay.env
 ExecStart=/usr/bin/env bash -lc 'exec "${FIRECRACKER_REPO_ROOT}/firecracker/runtime/launch.sh" relay "${FIRECRACKER_CONFIG}" "${FIRECRACKER_SOCKET:-}"'

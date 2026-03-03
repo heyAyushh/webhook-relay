@@ -6,7 +6,7 @@ After=network.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-Environment=FIRECRACKER_REPO_ROOT=/opt/webhook-relay
+Environment=FIRECRACKER_REPO_ROOT=/opt/hook-serve
 EnvironmentFile=-/etc/firecracker/runtime.env
 EnvironmentFile=-/etc/firecracker/network.env
 ExecStart=/usr/bin/env bash -lc 'exec "${FIRECRACKER_REPO_ROOT}/scripts/setup-firecracker-bridge-network.sh"'
