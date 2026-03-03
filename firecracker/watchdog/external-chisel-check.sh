@@ -76,7 +76,10 @@ log() {
 }
 
 as_bool() {
-  case "${1,,}" in
+  local normalized_value=""
+
+  normalized_value="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  case "${normalized_value}" in
     1|true|yes|on) return 0 ;;
     *) return 1 ;;
   esac
