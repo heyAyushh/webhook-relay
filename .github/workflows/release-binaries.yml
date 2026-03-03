@@ -15,6 +15,8 @@ concurrency:
 
 jobs:
   build:
+    # Temporarily disabled: re-enable by removing this guard.
+    if: ${{ false }}
     name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -55,9 +57,10 @@ jobs:
           if-no-files-found: error
 
   publish-release:
+    # Temporarily disabled: re-enable by removing this guard.
+    if: ${{ false }}
     name: Publish GitHub release
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
 
     steps:

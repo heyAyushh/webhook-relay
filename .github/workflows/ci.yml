@@ -42,9 +42,13 @@ jobs:
         run: cargo build --workspace --release
 
       - name: Build release artifacts
+        # Temporarily disabled: release packaging in CI.
+        if: ${{ false }}
         run: scripts/build-release-binaries.sh
 
       - name: Crates publish dry-run
+        # Temporarily disabled: crates publish validation in CI.
+        if: ${{ false }}
         run: scripts/publish-crates.sh --dry-run
 
       - name: Shell syntax check

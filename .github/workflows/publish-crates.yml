@@ -34,6 +34,8 @@ concurrency:
 
 jobs:
   publish:
+    # Temporarily disabled: re-enable by removing this guard.
+    if: ${{ false }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     environment: crates-io
