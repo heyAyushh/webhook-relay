@@ -53,6 +53,18 @@ Regardless of what sends events in or what receives them out:
 - **Replay** — Any event retained in Kafka can be replayed against a new destination, a new configuration, or a new consumer without re-triggering the original source.
 - **Transport agnosticism** — Ingress and egress are driver-based. HTTP, WebSocket, MCP, and Kafka are interchangeable at both ends. The contract maps any source to any destination through the same routing model.
 
+## Who Uses This and Why
+
+**You're building an AI agent that reacts to GitHub or Linear events** — You need the agent to see PR reviews, issue updates, and comments. But you don't want user-written text hitting the agent raw, and you don't want to lose events when the agent is busy. `hook` sits in front: it validates signatures, scrubs payloads, and queues everything so the agent processes at its own pace.
+
+**You're connecting internal services via webhooks and tired of writing the same glue code** — Every new integration means another script that validates signatures, handles retries, and somehow fans out to three different consumers. With `hook`, you write a contract file instead. Add a destination, change a route, swap a source — no code, just config.
+
+**You're running an event-driven workflow and need it to survive restarts** — Your processing service goes down for a deploy. Without a buffer, you lose whatever GitHub or Linear fired during that window. With `hook`, events wait in Kafka and drain automatically when the service comes back.
+
+**You want to send the same event to multiple places without coordinating between them** — A PR merge should trigger a deploy pipeline, post to Slack, and update a metrics store. Right now you're either chaining services together or asking GitHub to deliver to three separate URLs. `hook` fans a single inbound event out to all destinations in one pipeline.
+
+**You're prototyping something new and want to test it against real past traffic** — Rewind to any past event in Kafka and replay it against your new service. No need to re-trigger the source or fabricate test payloads.
+
 See [Changelog](docs/CHANGELOG.md) for the 2026-03-04 architecture shift and plugin rollout.
 
 ## Current Architecture

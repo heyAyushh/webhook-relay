@@ -3,7 +3,7 @@ name = "hook-serve"
 version = "0.2.0"
 edition = "2024"
 description = "Security-focused webhook ingress relay for GitHub/Linear to Kafka and OpenClaw."
-license = "MIT OR Apache-2.0"
+license-file = "LICENSE"
 repository = "https://github.com/heyAyushh/webhook-relay"
 readme = "README.md"
 rust-version = "1.85"
@@ -13,8 +13,8 @@ include = [
     "src/**",
     "Cargo.toml",
     "README.md",
-    "LICENSE-MIT",
-    "LICENSE-APACHE",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
 ]
 
 [workspace]
