@@ -1,0 +1,45 @@
+[app]
+id = "default-openclaw"
+name = "Default OpenClaw"
+version = "1.0.0"
+description = "Compatibility default profile: HTTP webhook ingress to OpenClaw smash via Kafka core"
+
+[policies]
+allow_no_output = false
+validation_mode = "strict"
+
+[serve]
+
+[[serve.ingress_adapters]]
+id = "http-ingress"
+driver = "http_webhook_ingress"
+bind = "0.0.0.0:8080"
+path_template = "/webhook/{source}"
+
+[[serve.routes]]
+id = "all-to-core"
+source_match = "*"
+event_type_pattern = "*"
+target_topic = "webhooks.core"
+
+[smash]
+
+[[smash.egress_adapters]]
+id = "openclaw-output"
+driver = "openclaw_http_output"
+url = "http://127.0.0.1:18789/hooks/agent"
+token_env = "OPENCLAW_WEBHOOK_TOKEN"
+timeout_seconds = 20
+max_retries = 5
+
+[[smash.routes]]
+id = "core-to-openclaw"
+source_topic_pattern = "webhooks.core"
+destinations = [{ adapter_id = "openclaw-output", required = true }]
+
+[profiles.default-openclaw]
+label = "Default OpenClaw"
+serve_adapters = ["http-ingress"]
+smash_adapters = ["openclaw-output"]
+serve_routes = ["all-to-core"]
+smash_routes = ["core-to-openclaw"]

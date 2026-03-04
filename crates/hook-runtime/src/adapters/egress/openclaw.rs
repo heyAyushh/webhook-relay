@@ -1,4 +1,3 @@
-use crate::config::Config;
 use anyhow::{Context, Result, anyhow};
 use relay_core::model::WebhookEnvelope;
 use reqwest::Client;
@@ -7,14 +6,24 @@ use serde_json::Value;
 use tokio::time::{Duration, sleep};
 use tracing::{debug, info, warn};
 
+#[derive(Debug, Clone)]
+pub struct OpenclawOutputTarget {
+    pub adapter_id: String,
+    pub webhook_url: String,
+    pub webhook_token: String,
+    pub message_max_bytes: usize,
+    pub http_timeout_seconds: u64,
+    pub max_retries: u32,
+    pub backoff_base_seconds: u64,
+    pub backoff_max_seconds: u64,
+}
+
 #[derive(Clone)]
-pub struct Forwarder {
-    config: Config,
+pub struct OpenclawOutputAdapter {
+    target: OpenclawOutputTarget,
     client: Client,
 }
 
-/// Mapped-hook payload: OpenClaw `hooks.mappings` provides agent/session/model
-/// routing. Consumer only forwards event envelope fields.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct MappedHookPayload {
@@ -33,30 +42,32 @@ enum ForwardErrorKind {
 
 const MAX_OPENCLAW_RESPONSE_PREVIEW_CHARS: usize = 2_048;
 
-impl Forwarder {
-    pub fn new(config: Config) -> Result<Self> {
+impl OpenclawOutputAdapter {
+    pub fn new(target: OpenclawOutputTarget) -> Result<Self> {
         let client = Client::builder()
-            .timeout(Duration::from_secs(config.openclaw_http_timeout_seconds))
+            .timeout(Duration::from_secs(target.http_timeout_seconds))
             .build()
             .context("build reqwest client")?;
 
-        Ok(Self { config, client })
+        Ok(Self { target, client })
     }
 
     pub async fn forward_with_retry(&self, envelope: &WebhookEnvelope) -> Result<()> {
-        for attempt in 1..=self.config.max_retries {
+        for attempt in 1..=self.target.max_retries {
             debug!(
+                adapter_id = self.target.adapter_id.as_str(),
                 event_id = envelope.id.as_str(),
                 source = envelope.source.as_str(),
                 event_type = envelope.event_type.as_str(),
                 attempt,
-                max_attempts = self.config.max_retries,
+                max_attempts = self.target.max_retries,
                 "attempting to forward webhook envelope to openclaw"
             );
             match self.forward_once(envelope).await {
                 Ok(()) => return Ok(()),
                 Err(ForwardErrorKind::Permanent(message)) => {
                     warn!(
+                        adapter_id = self.target.adapter_id.as_str(),
                         event_id = envelope.id.as_str(),
                         source = envelope.source.as_str(),
                         event_type = envelope.event_type.as_str(),
@@ -67,8 +78,9 @@ impl Forwarder {
                     return Err(anyhow!("forward failed permanently: {message}"));
                 }
                 Err(ForwardErrorKind::Retryable(message)) => {
-                    if attempt >= self.config.max_retries {
+                    if attempt >= self.target.max_retries {
                         warn!(
+                            adapter_id = self.target.adapter_id.as_str(),
                             event_id = envelope.id.as_str(),
                             source = envelope.source.as_str(),
                             event_type = envelope.event_type.as_str(),
@@ -84,11 +96,12 @@ impl Forwarder {
                     }
 
                     let backoff_seconds = retry_backoff_seconds(
-                        self.config.backoff_base_seconds,
-                        self.config.backoff_max_seconds,
+                        self.target.backoff_base_seconds,
+                        self.target.backoff_max_seconds,
                         attempt.saturating_sub(1),
                     );
                     warn!(
+                        adapter_id = self.target.adapter_id.as_str(),
                         event_id = envelope.id.as_str(),
                         source = envelope.source.as_str(),
                         event_type = envelope.event_type.as_str(),
@@ -114,23 +127,24 @@ impl Forwarder {
             event_type: envelope.event_type.clone(),
             id: envelope.id.clone(),
             received_at: envelope.received_at.clone(),
-            payload: summarize_payload(&envelope.payload, self.config.openclaw_message_max_bytes),
+            payload: summarize_payload(&envelope.payload, self.target.message_max_bytes),
         };
         debug!(
+            adapter_id = self.target.adapter_id.as_str(),
             event_id = envelope.id.as_str(),
             source = envelope.source.as_str(),
             event_type = envelope.event_type.as_str(),
-            openclaw_webhook_url = self.config.openclaw_webhook_url.as_str(),
+            openclaw_webhook_url = self.target.webhook_url.as_str(),
             outbound_payload = %to_json_string(&payload),
             "posting mapped webhook payload to openclaw"
         );
 
         let response = match self
             .client
-            .post(&self.config.openclaw_webhook_url)
+            .post(&self.target.webhook_url)
             .header(
                 "Authorization",
-                format!("Bearer {}", self.config.openclaw_webhook_token),
+                format!("Bearer {}", self.target.webhook_token),
             )
             .header("Content-Type", "application/json")
             .json(&payload)
@@ -141,20 +155,22 @@ impl Forwarder {
             Err(error) => {
                 if error.is_timeout() || error.is_connect() || error.is_request() {
                     warn!(
+                        adapter_id = self.target.adapter_id.as_str(),
                         event_id = envelope.id.as_str(),
                         source = envelope.source.as_str(),
                         event_type = envelope.event_type.as_str(),
-                        openclaw_webhook_url = self.config.openclaw_webhook_url.as_str(),
+                        openclaw_webhook_url = self.target.webhook_url.as_str(),
                         error = %error,
                         "retryable openclaw request error"
                     );
                     return Err(ForwardErrorKind::Retryable(error.to_string()));
                 }
                 warn!(
+                    adapter_id = self.target.adapter_id.as_str(),
                     event_id = envelope.id.as_str(),
                     source = envelope.source.as_str(),
                     event_type = envelope.event_type.as_str(),
-                    openclaw_webhook_url = self.config.openclaw_webhook_url.as_str(),
+                    openclaw_webhook_url = self.target.webhook_url.as_str(),
                     error = %error,
                     "permanent openclaw request error"
                 );
@@ -169,10 +185,11 @@ impl Forwarder {
         };
         if status.is_success() {
             info!(
+                adapter_id = self.target.adapter_id.as_str(),
                 event_id = envelope.id.as_str(),
                 source = envelope.source.as_str(),
                 event_type = envelope.event_type.as_str(),
-                openclaw_webhook_url = self.config.openclaw_webhook_url.as_str(),
+                openclaw_webhook_url = self.target.webhook_url.as_str(),
                 status = %status,
                 response_body = response_body.as_str(),
                 "openclaw webhook accepted forwarded event"
@@ -182,10 +199,11 @@ impl Forwarder {
 
         if status.is_server_error() || status.as_u16() == 429 {
             warn!(
+                adapter_id = self.target.adapter_id.as_str(),
                 event_id = envelope.id.as_str(),
                 source = envelope.source.as_str(),
                 event_type = envelope.event_type.as_str(),
-                openclaw_webhook_url = self.config.openclaw_webhook_url.as_str(),
+                openclaw_webhook_url = self.target.webhook_url.as_str(),
                 status = %status,
                 response_body = response_body.as_str(),
                 "openclaw returned retryable status"
@@ -196,10 +214,11 @@ impl Forwarder {
         }
 
         warn!(
+            adapter_id = self.target.adapter_id.as_str(),
             event_id = envelope.id.as_str(),
             source = envelope.source.as_str(),
             event_type = envelope.event_type.as_str(),
-            openclaw_webhook_url = self.config.openclaw_webhook_url.as_str(),
+            openclaw_webhook_url = self.target.webhook_url.as_str(),
             status = %status,
             response_body = response_body.as_str(),
             "openclaw returned non-retryable status"

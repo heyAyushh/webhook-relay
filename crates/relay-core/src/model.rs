@@ -58,24 +58,44 @@ impl FromStr for Source {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WebhookEnvelope {
+pub struct EventEnvelope {
     pub id: String,
     pub source: String,
     pub event_type: String,
     pub received_at: String,
     pub payload: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<EventMeta>,
 }
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventMeta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingress_adapter: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flags: Vec<String>,
+}
+
+pub type WebhookEnvelope = EventEnvelope;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DlqEnvelope {
     pub failed_at: String,
     pub error: String,
-    pub envelope: WebhookEnvelope,
+    pub envelope: EventEnvelope,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_SOURCE_TOPIC_PREFIX, normalize_source_name, source_topic_name};
+    use super::{
+        DEFAULT_SOURCE_TOPIC_PREFIX, EventEnvelope, EventMeta, normalize_source_name,
+        source_topic_name,
+    };
+    use serde_json::json;
 
     #[test]
     fn normalizes_source_name() {
@@ -90,5 +110,46 @@ mod tests {
             Some("webhooks.linear")
         );
         assert!(source_topic_name("", "linear").is_none());
+    }
+
+    #[test]
+    fn omits_meta_field_when_none() {
+        let envelope = EventEnvelope {
+            id: "id-1".to_string(),
+            source: "github".to_string(),
+            event_type: "pull_request.opened".to_string(),
+            received_at: "2026-01-01T00:00:00Z".to_string(),
+            payload: json!({"x": 1}),
+            meta: None,
+        };
+
+        let serialized = serde_json::to_value(envelope).expect("serialize envelope");
+        assert!(serialized.get("meta").is_none());
+    }
+
+    #[test]
+    fn serializes_meta_when_present() {
+        let envelope = EventEnvelope {
+            id: "id-1".to_string(),
+            source: "github".to_string(),
+            event_type: "pull_request.opened".to_string(),
+            received_at: "2026-01-01T00:00:00Z".to_string(),
+            payload: json!({"x": 1}),
+            meta: Some(EventMeta {
+                trace_id: Some("trace-1".to_string()),
+                ingress_adapter: Some("http-ingress".to_string()),
+                route_key: Some("all-to-core".to_string()),
+                flags: vec!["sanitized".to_string()],
+            }),
+        };
+
+        let serialized = serde_json::to_value(envelope).expect("serialize envelope");
+        assert_eq!(
+            serialized
+                .get("meta")
+                .and_then(|value| value.get("trace_id"))
+                .and_then(|value| value.as_str()),
+            Some("trace-1")
+        );
     }
 }

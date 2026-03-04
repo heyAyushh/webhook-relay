@@ -1,6 +1,66 @@
 use anyhow::{Context, Result, anyhow};
 use ipnet::IpNet;
+use serde::Deserialize;
 use std::env;
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ServeRouteRule {
+    pub id: String,
+    pub source_match: String,
+    pub event_type_pattern: String,
+    pub target_topic: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "driver", rename_all = "snake_case")]
+pub enum RuntimeServePluginConfig {
+    EventTypeAlias { from: String, to: String },
+    RequirePayloadField { pointer: String },
+    AddMetaFlag { flag: String },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "driver", rename_all = "snake_case")]
+pub enum RuntimeIngressAdapter {
+    HttpWebhookIngress {
+        id: String,
+        bind: String,
+        path_template: String,
+        #[serde(default)]
+        plugins: Vec<RuntimeServePluginConfig>,
+    },
+    WebsocketIngress {
+        id: String,
+        path_template: String,
+        auth_mode: String,
+        #[serde(default)]
+        token_env: Option<String>,
+        #[serde(default)]
+        plugins: Vec<RuntimeServePluginConfig>,
+    },
+    McpIngestExposed {
+        id: String,
+        tool_name: String,
+        transport_driver: String,
+        bind: String,
+        auth_mode: String,
+        #[serde(default)]
+        token_env: Option<String>,
+        max_payload_bytes: usize,
+        path: String,
+        #[serde(default)]
+        plugins: Vec<RuntimeServePluginConfig>,
+    },
+    KafkaIngress {
+        id: String,
+        topics: Vec<String>,
+        group_id: String,
+        #[serde(default)]
+        brokers: Option<String>,
+        #[serde(default)]
+        plugins: Vec<RuntimeServePluginConfig>,
+    },
+}
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -34,6 +94,12 @@ pub struct Config {
     pub publish_max_retries: u32,
     pub publish_backoff_base_ms: u64,
     pub publish_backoff_max_ms: u64,
+    pub validation_mode: String,
+    pub active_profile: String,
+    pub contract_path: Option<String>,
+    pub active_ingress_adapter_id: Option<String>,
+    pub ingress_adapters: Vec<RuntimeIngressAdapter>,
+    pub serve_routes: Vec<ServeRouteRule>,
 }
 
 impl Config {
@@ -123,6 +189,24 @@ impl Config {
             publish_max_retries: env_u32("RELAY_PUBLISH_MAX_RETRIES", 5)?,
             publish_backoff_base_ms: env_u64("RELAY_PUBLISH_BACKOFF_BASE_MS", 200)?,
             publish_backoff_max_ms: env_u64("RELAY_PUBLISH_BACKOFF_MAX_MS", 5_000)?,
+            validation_mode: env::var("RELAY_VALIDATION_MODE")
+                .unwrap_or_else(|_| "strict".to_string())
+                .trim()
+                .to_ascii_lowercase(),
+            active_profile: env::var("RELAY_PROFILE")
+                .unwrap_or_else(|_| "default-openclaw".to_string())
+                .trim()
+                .to_string(),
+            contract_path: env::var("RELAY_CONTRACT_PATH")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            active_ingress_adapter_id: env::var("RELAY_INGRESS_ADAPTER_ID")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            ingress_adapters: parse_ingress_adapters_from_env()?,
+            serve_routes: parse_serve_routes_from_env()?,
         };
 
         if config.kafka_topic_partitions <= 0 {
@@ -186,6 +270,160 @@ impl Config {
                 return Err(anyhow!(
                     "unsupported KAFKA_SECURITY_PROTOCOL={other}; expected ssl or plaintext"
                 ));
+            }
+        }
+
+        match config.validation_mode.as_str() {
+            "strict" | "debug" => {}
+            other => {
+                return Err(anyhow!(
+                    "unsupported RELAY_VALIDATION_MODE={other}; expected strict or debug"
+                ));
+            }
+        }
+
+        for route in &config.serve_routes {
+            if route.id.trim().is_empty() {
+                return Err(anyhow!("RELAY_SERVE_ROUTES_JSON route id cannot be empty"));
+            }
+            if route.source_match.trim().is_empty() {
+                return Err(anyhow!(
+                    "RELAY_SERVE_ROUTES_JSON route source_match cannot be empty"
+                ));
+            }
+            if route.event_type_pattern.trim().is_empty() {
+                return Err(anyhow!(
+                    "RELAY_SERVE_ROUTES_JSON route event_type_pattern cannot be empty"
+                ));
+            }
+            if route.target_topic.trim().is_empty() {
+                return Err(anyhow!(
+                    "RELAY_SERVE_ROUTES_JSON route target_topic cannot be empty"
+                ));
+            }
+        }
+
+        for adapter in &config.ingress_adapters {
+            match adapter {
+                RuntimeIngressAdapter::HttpWebhookIngress {
+                    id,
+                    bind,
+                    path_template,
+                    plugins,
+                } => {
+                    if id.trim().is_empty() {
+                        return Err(anyhow!(
+                            "RELAY_INGRESS_ADAPTERS_JSON http_webhook_ingress id cannot be empty"
+                        ));
+                    }
+                    if bind.trim().is_empty() {
+                        return Err(anyhow!(
+                            "RELAY_INGRESS_ADAPTERS_JSON http_webhook_ingress bind cannot be empty"
+                        ));
+                    }
+                    if path_template.trim().is_empty() {
+                        return Err(anyhow!(
+                            "RELAY_INGRESS_ADAPTERS_JSON http_webhook_ingress path_template cannot be empty"
+                        ));
+                    }
+                    validate_serve_plugins(plugins, id)?;
+                }
+                RuntimeIngressAdapter::WebsocketIngress {
+                    id,
+                    path_template,
+                    auth_mode,
+                    plugins,
+                    ..
+                } => {
+                    if id.trim().is_empty() {
+                        return Err(anyhow!(
+                            "RELAY_INGRESS_ADAPTERS_JSON websocket_ingress id cannot be empty"
+                        ));
+                    }
+                    if path_template.trim().is_empty() {
+                        return Err(anyhow!(
+                            "RELAY_INGRESS_ADAPTERS_JSON websocket_ingress path_template cannot be empty"
+                        ));
+                    }
+                    if auth_mode.trim().is_empty() {
+                        return Err(anyhow!(
+                            "RELAY_INGRESS_ADAPTERS_JSON websocket_ingress auth_mode cannot be empty"
+                        ));
+                    }
+                    validate_serve_plugins(plugins, id)?;
+                }
+                RuntimeIngressAdapter::McpIngestExposed {
+                    id,
+                    tool_name,
+                    transport_driver,
+                    bind,
+                    auth_mode,
+                    token_env: _,
+                    max_payload_bytes,
+                    path,
+                    plugins,
+                } => {
+                    if id.trim().is_empty() {
+                        return Err(anyhow!(
+                            "RELAY_INGRESS_ADAPTERS_JSON mcp_ingest_exposed id cannot be empty"
+                        ));
+                    }
+                    if tool_name.trim().is_empty() {
+                        return Err(anyhow!(
+                            "RELAY_INGRESS_ADAPTERS_JSON mcp_ingest_exposed tool_name cannot be empty"
+                        ));
+                    }
+                    if transport_driver.trim().is_empty() {
+                        return Err(anyhow!(
+                            "RELAY_INGRESS_ADAPTERS_JSON mcp_ingest_exposed transport_driver cannot be empty"
+                        ));
+                    }
+                    if bind.trim().is_empty() {
+                        return Err(anyhow!(
+                            "RELAY_INGRESS_ADAPTERS_JSON mcp_ingest_exposed bind cannot be empty"
+                        ));
+                    }
+                    if auth_mode.trim().is_empty() {
+                        return Err(anyhow!(
+                            "RELAY_INGRESS_ADAPTERS_JSON mcp_ingest_exposed auth_mode cannot be empty"
+                        ));
+                    }
+                    if *max_payload_bytes == 0 {
+                        return Err(anyhow!(
+                            "RELAY_INGRESS_ADAPTERS_JSON mcp_ingest_exposed max_payload_bytes must be positive"
+                        ));
+                    }
+                    if path.trim().is_empty() {
+                        return Err(anyhow!(
+                            "RELAY_INGRESS_ADAPTERS_JSON mcp_ingest_exposed path cannot be empty"
+                        ));
+                    }
+                    validate_serve_plugins(plugins, id)?;
+                }
+                RuntimeIngressAdapter::KafkaIngress {
+                    id,
+                    topics,
+                    group_id,
+                    plugins,
+                    ..
+                } => {
+                    if id.trim().is_empty() {
+                        return Err(anyhow!(
+                            "RELAY_INGRESS_ADAPTERS_JSON kafka_ingress id cannot be empty"
+                        ));
+                    }
+                    if topics.is_empty() || topics.iter().any(|topic| topic.trim().is_empty()) {
+                        return Err(anyhow!(
+                            "RELAY_INGRESS_ADAPTERS_JSON kafka_ingress topics must be non-empty"
+                        ));
+                    }
+                    if group_id.trim().is_empty() {
+                        return Err(anyhow!(
+                            "RELAY_INGRESS_ADAPTERS_JSON kafka_ingress group_id cannot be empty"
+                        ));
+                    }
+                    validate_serve_plugins(plugins, id)?;
+                }
             }
         }
 
@@ -349,6 +587,73 @@ fn env_cidrs(name: &str, default: &str) -> Result<Vec<IpNet>> {
         .collect()
 }
 
+fn parse_serve_routes_from_env() -> Result<Vec<ServeRouteRule>> {
+    let raw = match env::var("RELAY_SERVE_ROUTES_JSON") {
+        Ok(value) => value,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    serde_json::from_str::<Vec<ServeRouteRule>>(trimmed)
+        .with_context(|| "parse RELAY_SERVE_ROUTES_JSON as route list".to_string())
+}
+
+fn parse_ingress_adapters_from_env() -> Result<Vec<RuntimeIngressAdapter>> {
+    let raw = match env::var("RELAY_INGRESS_ADAPTERS_JSON") {
+        Ok(value) => value,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    serde_json::from_str::<Vec<RuntimeIngressAdapter>>(trimmed)
+        .with_context(|| "parse RELAY_INGRESS_ADAPTERS_JSON as adapter list".to_string())
+}
+
+fn validate_serve_plugins(plugins: &[RuntimeServePluginConfig], adapter_id: &str) -> Result<()> {
+    for plugin in plugins {
+        match plugin {
+            RuntimeServePluginConfig::EventTypeAlias { from, to } => {
+                if from.trim().is_empty() || to.trim().is_empty() {
+                    return Err(anyhow!(
+                        "RELAY_INGRESS_ADAPTERS_JSON adapter '{}' event_type_alias plugin requires non-empty from/to",
+                        adapter_id
+                    ));
+                }
+            }
+            RuntimeServePluginConfig::RequirePayloadField { pointer } => {
+                if pointer.trim().is_empty() {
+                    return Err(anyhow!(
+                        "RELAY_INGRESS_ADAPTERS_JSON adapter '{}' require_payload_field plugin requires non-empty pointer",
+                        adapter_id
+                    ));
+                }
+                if !pointer.starts_with('/') {
+                    return Err(anyhow!(
+                        "RELAY_INGRESS_ADAPTERS_JSON adapter '{}' require_payload_field pointer must start with '/'",
+                        adapter_id
+                    ));
+                }
+            }
+            RuntimeServePluginConfig::AddMetaFlag { flag } => {
+                if flag.trim().is_empty() {
+                    return Err(anyhow!(
+                        "RELAY_INGRESS_ADAPTERS_JSON adapter '{}' add_meta_flag plugin requires non-empty flag",
+                        adapter_id
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::Config;
@@ -388,6 +693,12 @@ mod tests {
         "RELAY_PUBLISH_MAX_RETRIES",
         "RELAY_PUBLISH_BACKOFF_BASE_MS",
         "RELAY_PUBLISH_BACKOFF_MAX_MS",
+        "RELAY_VALIDATION_MODE",
+        "RELAY_PROFILE",
+        "RELAY_CONTRACT_PATH",
+        "RELAY_INGRESS_ADAPTER_ID",
+        "RELAY_INGRESS_ADAPTERS_JSON",
+        "RELAY_SERVE_ROUTES_JSON",
     ];
 
     struct EnvSnapshot {

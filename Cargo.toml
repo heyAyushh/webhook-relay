@@ -20,13 +20,16 @@ include = [
 [workspace]
 members = [
     "crates/relay-core",
+    "crates/hook-runtime",
     "apps/kafka-openclaw-hook",
+    "tools/hook",
 ]
 resolver = "2"
 
 [dependencies]
 anyhow = "1.0.98"
-axum = { version = "0.8.4", features = ["macros"] }
+axum = { version = "=0.8.4", features = ["macros", "ws"] }
+futures-util = "0.3.31"
 chrono = { version = "0.4.42", default-features = false, features = ["clock"] }
 ipnet = "2.11.0"
 rdkafka = { version = "0.38.0", features = ["cmake-build"] }

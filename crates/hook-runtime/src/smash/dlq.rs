@@ -1,4 +1,4 @@
-use crate::config::Config;
+use super::config::Config;
 use anyhow::{Context, Result, anyhow};
 use chrono::{SecondsFormat, Utc};
 use rdkafka::ClientConfig;

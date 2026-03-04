@@ -1,0 +1,25 @@
+[package]
+name = "hook-runtime"
+version = "0.1.0"
+edition = "2024"
+description = "Reusable runtime execution engine for hook serve/smash pipelines."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/heyAyushh/webhook-relay"
+rust-version = "1.85"
+
+[dependencies]
+anyhow = "1.0.98"
+axum = { version = "=0.8.4", features = ["macros", "ws"] }
+chrono = { version = "0.4.42", default-features = false, features = ["clock"] }
+futures-util = "0.3.31"
+rdkafka = { version = "0.38.0", features = ["cmake-build"] }
+reqwest = { version = "0.12.22", default-features = false, features = ["json", "rustls-tls"] }
+relay-core = { version = "0.2.0", path = "../relay-core" }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+tokio = { version = "1.47.1", features = ["full"] }
+tokio-tungstenite = "0.26.2"
+tracing = "0.1.41"
+
+[dev-dependencies]
+tempfile = "3.21.0"
