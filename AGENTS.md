@@ -2,41 +2,44 @@
 
 ## Project Structure
 
-- `src/`: `webhook-relay` ingress service.
-  - `main.rs`: Axum server, `/webhook/{source}`, health/readiness, rate limiting.
-  - `producer.rs`: Kafka producer with retry/backoff worker.
-  - `sources/`: source-specific auth + event extraction (`github`, `linear`).
-- `apps/kafka-openclaw-hook/`: outbound-only consumer daemon.
-  - `consumer.rs`: Kafka consume loop and commit behavior.
-  - `forwarder.rs`: POST `/hooks/agent` with retry policy.
-  - `dlq.rs`: publish exhausted failures to DLQ topic.
-- `crates/relay-core/`: shared models/signatures/sanitization logic.
+- `src/`: `webhook-relay` serve runtime (Axum, `/webhook/{source}`, health/readiness, rate limiting).
+- `tools/hook/`: CLI/operator control plane (`hook serve`, `hook relay`, `hook smash`, ops commands).
+- `apps/default-openclaw/`: canonical compatibility contract (`contract.toml`), default flow `http_webhook_ingress → kafka core → openclaw_http_output`.
+- `apps/kafka-openclaw-hook/`: compatibility binary wrapper that calls `hook_runtime::smash::run_from_env()`.
+- `crates/hook-runtime/`: runtime execution engine (adapters + smash runtime).
+- `crates/relay-core/`: shared contracts, validator, model, signatures, sanitization.
+- `config/`: Kafka-core defaults and schema examples.
+- `docs/`: changelog, spec, roadmap, and references.
 - `firecracker/`: Firecracker microVM artifacts for binary-first deployment.
   - `runtime/`: portable jailer launcher, cleanup, overwatcher, broker inventory helpers.
   - `systemd/`: host service templates (`firecracker@.service`, network, proxy-mux, watchdog timer, external checker units) and env examples.
   - `watchdog/`: local watchdog (auto-recovery + heartbeat), boot/shutdown loggers, alert helper, and external blackbox/chisel checker scripts.
-- `deploy/nginx/`: TLS termination config.
-- `systemd/`: runtime unit files for non-Firecracker binary deployment.
 - `skills/`: operational skills and runbooks.
   - `kafka-kraft-firecracker/`: deploy single-node Kafka KRaft in a Firecracker VM.
-- `references/`: technical guides (boot, hooks, sanitization, release publishing, Tailscale).
-- `memory/agent-tasks.md`: orchestrator shared state board.
 
 ## Build, Test, and Dev Commands
 
 - Format: `cargo fmt --all`
-- Lint (if installed): `cargo clippy --workspace --all-targets -- -D warnings`
+- Lint: `cargo clippy --workspace --all-targets -- -D warnings`
 - Test: `cargo test --workspace`
 - Release build: `cargo build --workspace --release`
 - Build release archives: `scripts/build-release-binaries.sh`
 - Crates publish dry-run: `scripts/publish-crates.sh --dry-run`
 - Generate mTLS certs: `scripts/gen-certs.sh`
-- Bootstrap full local setup: `scripts/init.sh --up`
-- Start relay stack: `docker compose -f docker-compose.yml up --build`
-- Start relay dev override stack: `docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build`
-- Shell syntax check: `bash -n <script>` (CI checks init, gen-certs, smoke-test-rust, build-release-binaries, publish-crates)
 - Firecracker host network setup: `sudo scripts/setup-firecracker-bridge-network.sh`
 - Firecracker host network teardown: `sudo scripts/teardown-firecracker-bridge-network.sh`
+- Shell syntax check: `bash -n <script>`
+
+## CLI Quick Reference
+
+```bash
+cargo install --path tools/hook
+
+hook serve --app default-openclaw
+hook relay --topics webhooks.github,webhooks.linear --output-topic webhooks.core
+hook smash --app default-openclaw
+hook debug capabilities
+```
 
 ## Coding Standards
 
@@ -45,7 +48,7 @@
 - Keep functions single-purpose and small; extract helpers early.
 - Fail closed on auth/validation paths.
 - Never log webhook payload bodies on auth failures.
-- Keep source-specific security logic in `src/sources/*`.
+- Unsupported contract drivers are rejected only when active in the selected profile.
 
 ## Testing Expectations
 
@@ -62,13 +65,8 @@
 ## Commit and PR Guidelines
 
 - Use Conventional Commits.
-- Keep commits scoped by component (`relay`, `consumer`, `docs`, `ops`).
+- Keep commits scoped by component (`serve`, `relay`, `smash`, `docs`, `ops`).
 - PRs should include:
   - behavior summary
   - exact test commands run
-  - config/deploy impact (`.env`, compose, systemd, TLS)
-
-## Notes
-
-- Legacy shell/Python relay scripts have been removed from the active runtime path.
-- If a requested skill like `$init` is not available in session skills, proceed with the closest manual equivalent and document the outcome.
+  - config/deploy impact (`.env`, contract, systemd, TLS)
