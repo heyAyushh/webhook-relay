@@ -1,19 +1,15 @@
 ---
 name: hook-serve
-description: >
-  Build, maintain, and operate the contract-driven hook workspace with
-  serve/relay/smash roles, Kafka core transport, and plug-and-play adapters.
-  Use when editing runtime behavior, contract validation, adapter/plugin
-  execution, or deployment documentation.
+description: "Configure Kafka topics, validate hook contracts, register ingress/egress adapters, and manage serve/relay/smash runtime roles in the contract-driven hook workspace. Use when adding a webhook source, writing or debugging a contract.toml, implementing an adapter or plugin, changing event routing, or updating deployment and operator documentation."
 ---
 
 # Hook Serve Workspace Skill
 
 ## Workspace Map
 
-- `src/`: serve runtime (`hook-serve`)
-- `tools/hook/`: operator CLI for role execution and ops workflows
-- `apps/default-openclaw/`: canonical compatibility contract
+- `src/`: serve runtime (`hook-serve`) — HTTP/WebSocket/MCP ingress, rate limiting, health checks
+- `tools/hook/`: operator CLI (`hook serve`, `hook relay`, `hook smash`, `hook debug`)
+- `apps/default-openclaw/`: canonical compatibility contract (`contract.toml`)
 - `apps/kafka-openclaw-hook/`: compatibility wrapper binary for smash runtime
 - `crates/relay-core/`: contracts, validator, shared envelope/security primitives
 - `crates/hook-runtime/`: smash runtime and adapter execution engine
@@ -41,16 +37,21 @@ description: >
 
 1. Make the smallest change in the owning module.
 2. Update contract/runtime docs when behavior changes.
-3. Run:
-- `cargo fmt --all`
-- `cargo clippy --workspace --all-targets -- -D warnings`
-- `cargo test --workspace`
+3. Validate:
+
+```bash
+cargo fmt --all
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
+
+If clippy fails on contract changes, verify envelope schema compatibility in `crates/relay-core/`. If tests fail, check that adapter driver enums match the contract schema before re-running.
 
 ## Key Docs
 
-- `README.md`
-- `docs/CHANGELOG.md`
-- `docs/spec.md`
-- `tools/hook/README.md`
-- `crates/relay-core/README.md`
-- `crates/hook-runtime/README.md`
+- `README.md` — project overview, CLI quick reference, coding standards
+- `docs/CHANGELOG.md` — release history and breaking changes
+- `docs/spec.md` — contract schema definitions and profile semantics
+- `tools/hook/README.md` — CLI subcommands and flags
+- `crates/relay-core/README.md` — shared contracts, validation, envelope models
+- `crates/hook-runtime/README.md` — smash runtime, adapter execution engine

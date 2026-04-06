@@ -1,24 +1,18 @@
 ---
 name: contract-authoring
-description: >
-  Write, validate, and debug hook contract.toml files. Covers the full schema
-  (app, policies, serve, smash, profiles, transports), all supported driver
-  config keys, validation rules, plugin system, and common error codes. Use
-  when creating a new app contract, extending an existing one, or diagnosing
-  contract validation failures.
+description: "Write, validate, and debug hook contract.toml files covering the full schema (app, policies, serve, smash, profiles, transports), all supported driver config keys, validation rules, plugin system, and error codes. Use when creating a new app contract, extending an existing one, diagnosing validation failures, configuring hook routing, or troubleshooting toml config errors."
 ---
 
 # Contract Authoring
 
-## What a Contract Is
+`contract.toml` is the runtime configuration for a hook app. It declares which ingress adapters receive events (`serve`), which egress adapters deliver events (`smash`), how events route between them (`routes`), and which combination is active (`profiles`). The validator uses `deny_unknown_fields` — any typo in a key is a hard error.
 
-`contract.toml` is the runtime configuration for a hook app. It declares:
-- Which ingress adapters receive events (`serve`)
-- Which egress adapters deliver events (`smash`)
-- How events are routed between them (`routes`)
-- Which combination of adapters and routes is active (`profiles`)
+## Validate-Fix Workflow
 
-The validator uses `deny_unknown_fields` throughout — any typo in a key is a hard error.
+1. Write or edit `contract.toml`
+2. Run `hook debug capabilities` to validate
+3. If an error code appears, consult the error table below → fix the issue → re-validate
+4. Only deploy when validation passes clean
 
 ---
 

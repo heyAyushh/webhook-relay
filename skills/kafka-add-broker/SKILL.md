@@ -1,11 +1,6 @@
 ---
 name: kafka-add-broker
-description: >
-  Add additional Kafka broker nodes to an existing KRaft cluster (typically
-  bootstrapped via the kafka-kraft-firecracker skill), or configure hook to
-  connect to an external Kafka broker or cluster. Use when scaling out brokers,
-  adding redundancy, or pointing hook serve/relay/smash at an externally managed
-  Kafka.
+description: "Add Kafka broker nodes to an existing KRaft cluster (typically bootstrapped via kafka-kraft-firecracker) or configure hook to connect to an external Kafka broker or cluster. Use when scaling out brokers, adding redundancy, connecting to external Kafka (AWS MSK, Confluent, self-hosted), or pointing hook serve/relay/smash at a new message broker."
 ---
 
 # Kafka Add Broker
